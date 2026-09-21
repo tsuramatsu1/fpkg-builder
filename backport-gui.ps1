@@ -21,7 +21,6 @@ Add-Type -AssemblyName System.Drawing
 # located by build-backport-update.ps1, which discovers it at run time.
 $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $builderScript = Join-Path $repoRoot 'build-backport-update.ps1'
-$creatorScript = Join-Path $repoRoot 'build-backport-files.ps1'
 $infoScript = Join-Path $repoRoot 'scripts\pkg-info.py'
 
 function Test-ToolkitRoot([string]$candidate) {
@@ -81,9 +80,8 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $root = New-Object System.Windows.Forms.TableLayoutPanel
 $root.Dock = 'Fill'
 $root.ColumnCount = 1
-$root.RowCount = 5
+$root.RowCount = 4
 $root.Padding = New-Object System.Windows.Forms.Padding(12)
-[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
@@ -194,78 +192,6 @@ $chkKeepWork.AutoSize = $true
 $chkKeepWork.Margin = New-Object System.Windows.Forms.Padding(24, 7, 0, 0)
 [void]$optionFlow.Controls.Add($chkKeepWork)
 
-# ------------------------------------------------------ create backport files
-$creator = New-Object System.Windows.Forms.GroupBox
-$creator.Text = 'Create backport files from decrypted binaries (optional)'
-$creator.Dock = 'Fill'
-$creator.AutoSize = $true
-$creator.Padding = New-Object System.Windows.Forms.Padding(10, 6, 10, 10)
-[void]$root.Controls.Add($creator, 0, 2)
-
-$creatorGrid = New-Object System.Windows.Forms.TableLayoutPanel
-$creatorGrid.Dock = 'Fill'
-$creatorGrid.AutoSize = $true
-$creatorGrid.ColumnCount = 3
-$creatorGrid.RowCount = 2
-[void]$creatorGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 215)))
-[void]$creatorGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
-[void]$creatorGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
-[void]$creator.Controls.Add($creatorGrid)
-
-$lblDecrypted = New-Object System.Windows.Forms.Label
-$lblDecrypted.Text = 'Decrypted binaries folder:'
-$lblDecrypted.AutoSize = $true
-$lblDecrypted.Anchor = 'Left'
-$lblDecrypted.Margin = New-Object System.Windows.Forms.Padding(0, 8, 8, 6)
-$txtDecrypted = New-Object System.Windows.Forms.TextBox
-$txtDecrypted.Dock = 'Fill'
-$txtDecrypted.Margin = New-Object System.Windows.Forms.Padding(0, 4, 8, 4)
-$btnDecrypted = New-Object System.Windows.Forms.Button
-$btnDecrypted.Text = 'Browse...'
-$btnDecrypted.AutoSize = $true
-$btnDecrypted.MinimumSize = New-Object System.Drawing.Size(88, 27)
-$btnDecrypted.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 2)
-[void]$creatorGrid.Controls.Add($lblDecrypted, 0, 0)
-[void]$creatorGrid.Controls.Add($txtDecrypted, 1, 0)
-[void]$creatorGrid.Controls.Add($btnDecrypted, 2, 0)
-
-$creatorFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-$creatorFlow.Dock = 'Fill'
-$creatorFlow.AutoSize = $true
-$creatorFlow.WrapContents = $true
-$creatorFlow.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 0)
-[void]$creatorGrid.Controls.Add($creatorFlow, 1, 1)
-$creatorGrid.SetColumnSpan($creatorFlow, 2)
-
-function Add-CreatorLabel([string]$text, [int]$leftPad = 0) {
-    $label = New-Object System.Windows.Forms.Label
-    $label.Text = $text
-    $label.AutoSize = $true
-    $label.Margin = New-Object System.Windows.Forms.Padding($leftPad, 9, 6, 0)
-    [void]$creatorFlow.Controls.Add($label)
-}
-
-Add-CreatorLabel 'Target firmware:'
-$txtTargetFw = New-Object System.Windows.Forms.TextBox
-$txtTargetFw.Width = 70
-$txtTargetFw.Text = '4.03'
-$txtTargetFw.Margin = New-Object System.Windows.Forms.Padding(0, 5, 4, 0)
-[void]$creatorFlow.Controls.Add($txtTargetFw)
-
-Add-CreatorLabel 'Source firmware:' 18
-$txtSourceFw = New-Object System.Windows.Forms.TextBox
-$txtSourceFw.Width = 70
-$txtSourceFw.Margin = New-Object System.Windows.Forms.Padding(0, 5, 4, 0)
-[void]$creatorFlow.Controls.Add($txtSourceFw)
-Add-CreatorLabel '(blank = lowest that covers the gap)'
-
-$btnCreateBackport = New-Object System.Windows.Forms.Button
-$btnCreateBackport.Text = 'Create backport files'
-$btnCreateBackport.AutoSize = $true
-$btnCreateBackport.MinimumSize = New-Object System.Drawing.Size(160, 27)
-$btnCreateBackport.Margin = New-Object System.Windows.Forms.Padding(18, 3, 0, 0)
-[void]$creatorFlow.Controls.Add($btnCreateBackport)
-
 # ------------------------------------------------------------------ log
 $log = New-Object System.Windows.Forms.TextBox
 $log.Multiline = $true
@@ -275,13 +201,13 @@ $log.WordWrap = $false
 $log.Dock = 'Fill'
 $log.Font = New-Object System.Drawing.Font('Consolas', 9)
 $log.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 8)
-[void]$root.Controls.Add($log, 0, 3)
+[void]$root.Controls.Add($log, 0, 2)
 
 $actions = New-Object System.Windows.Forms.FlowLayoutPanel
 $actions.Dock = 'Fill'
 $actions.AutoSize = $true
 $actions.FlowDirection = 'LeftToRight'
-[void]$root.Controls.Add($actions, 0, 4)
+[void]$root.Controls.Add($actions, 0, 3)
 
 $btnBuild = New-Object System.Windows.Forms.Button
 $btnBuild.Text = 'Build update'
@@ -327,7 +253,6 @@ function Append-Log([string]$line) {
 function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
     $btnBuildBase.Enabled = -not $busy
-    $btnCreateBackport.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
     $btnCancel.Enabled = $busy
 }
@@ -412,42 +337,6 @@ $referenceRow.BrowseButton.Add_Click({
 })
 $outputRow.BrowseButton.Add_Click({
     if ($savePkg.ShowDialog($form) -eq 'OK') { $txtOutput.Text = $savePkg.FileName }
-})
-
-$btnDecrypted.Add_Click({
-    if ($folderDialog.ShowDialog($form) -eq 'OK') { $txtDecrypted.Text = $folderDialog.SelectedPath }
-})
-
-$btnCreateBackport.Add_Click({
-    $decrypted = $txtDecrypted.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($decrypted)) {
-        Show-Error 'Choose the folder holding the game''s decrypted binaries.'
-        return
-    }
-    if (-not (Test-Path -LiteralPath $decrypted -PathType Container)) {
-        Show-Error "Folder not found: $decrypted"; return
-    }
-    $target = $txtTargetFw.Text.Trim()
-    if ($target -notmatch '^\d{1,2}\.\d{2}$') {
-        Show-Error 'Target firmware must look like 4.03.'; return
-    }
-    if ($folderDialog.ShowDialog($form) -ne 'OK') { return }
-    $out = $folderDialog.SelectedPath
-    $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $creatorScript,
-                   '-DecryptedFolder', $decrypted, '-OutputFolder', $out,
-                   '-TargetFirmware', $target, '-Force')
-    $source = $txtSourceFw.Text.Trim()
-    if (-not [string]::IsNullOrWhiteSpace($source)) { $arguments += @('-SourceFirmware', $source) }
-    $log.Clear()
-    $result = Invoke-Tool -FilePath (Get-Command powershell.exe).Source `
-        -Arguments $arguments -Activity 'Creating backport files...'
-    if ($result.ExitCode -eq 0) {
-        $txtBackport.Text = $out
-        Append-Log ''
-        Append-Log 'Backport files created and selected. Set the base PKG and output path, then Build update.'
-    } else {
-        Append-Log 'Backport creation failed.'
-    }
 })
 
 $btnInspect.Add_Click({ [void](Inspect-Reference) })

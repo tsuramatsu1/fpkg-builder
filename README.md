@@ -25,56 +25,6 @@ Set it once if yours lives elsewhere:
 setx PS5_FPKG_TOOLKIT "D:\path\to\fpkg converter"
 ```
 
-## Creating the backport files
-
-If you have the game's **decrypted** binaries but no backport yet,
-`build-backport-files.ps1` produces one:
-
-```powershell
-.\build-backport-files.ps1 `
-    -DecryptedFolder .\PPSA12345-app\decrypted `
-    -OutputFolder    .\my-backport `
-    -TargetFirmware  4.03 `
-    -SourceFirmware  10.01
-```
-
-Three stages, run against a copy so your tree is never modified:
-
-1. **SDK downgrade** — rewrites the SDK version fields so an older firmware accepts
-   the binaries. The target firmware's major version picks the SDK pair (`4.03` →
-   `--sdk 4`). It never *raises* a version: a binary already built against an older
-   SDK is left alone, because bumping one to match the target is a regression.
-2. **fakelib** — resolves every import against the target firmware and copies the
-   smallest closed set of libraries from a newer firmware that covers what is
-   missing. Omit `-SourceFirmware` to search for the earliest firmware that works;
-   fewer and older sideloaded libraries mean fewer of their own imports to satisfy.
-3. **fake-sign** — wraps each patched ELF in a PS5 SELF container (`54 14 F5 EE`),
-   which is what shipped backports use. Signing runs after the downgrade, since it
-   wraps the ELF and the SDK fields sit in segment data copied through untouched.
-
-This needs the **ps5-backport** repo for its scripts, import/export databases and
-`unp/` firmware trees. It is several GB and not redistributable, so it is not part
-of this repo; it is found via `-BackportRepo`, `PS5_BACKPORT_REPO`, a sibling
-`ps5-backport` folder, or `Documents\Repos\ps5-backport`.
-
-### Two things it cannot do for you
-
-**It needs real ELFs.** Every binary in a dump root is a SELF (`54 14 F5 EE`);
-these tools need `7F 45 4C 46`, which dumps normally carry in a `decrypted/`
-subfolder. The script checks and refuses rather than producing an empty result.
-
-**It does not produce `sce_module/libc.prx`.** A real backport *substitutes* the
-target SDK's build of libc — a different file, not a re-stamped one. libc is an SDK
-module, so it is not in any firmware tree. Copy it from a released backport of a
-comparable title.
-
-### The library list is a superset
-
-The analyzer names every library that could cover a missing import. A shipped 4.xx
-backport of a comparable title needs two (`libSceAgc` + `libSceAgcDriver`) where the
-analyzer named eight. Start with the Agc pair and add only what the klog demands —
-every sideloaded library downgrades a working system library.
-
 ## Running it
 
 ```bat
@@ -187,7 +137,6 @@ After a successful merge on PPSA06323, `app.pkg` grew from 2,442,133,504 to
 | --- | --- |
 | `scripts/pkg-info.py` | Container kind, digest and `param.json` of a package. |
 | `scripts/pkg-metric.py` | What a built package carries, from its metric file. |
-| `build-backport-files.ps1` | Create a backport file set from decrypted binaries. |
 
 ## Limits
 
