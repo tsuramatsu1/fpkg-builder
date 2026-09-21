@@ -1,0 +1,23 @@
+# Packages and build artefacts
+*.pkg
+*.pkg.remastered.pkg
+*.naps_metric.json
+*.gp5
+*.playgo-scenario.json
+.gp5-assets/
+*-build-logs/
+
+# The plaintext publishing toolkit is not redistributable and lives outside this
+# repo; point at it with PS5_FPKG_TOOLKIT or -ToolkitRoot.
+toolchain/
+prospero-pub-cmd.exe
+libScePubTools.dll
+
+# Game dumps and backport payloads
+*.sprx
+*.prx
+*.esbak
+eboot.bin
+
+__pycache__/
+*.pyc
