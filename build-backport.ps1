@@ -10,11 +10,15 @@ patch against the exact base package the console installed from.  The result
 carries only the changed files; every unchanged file is referenced from the base
 image.
 
-The base package is this tool's own artefact: -BasePackage names where it lives, and
-it is built from -GameFolder when missing and reused when present.  So a backport
-built in a later run references the very package this tool produced, which is the one
-the console has to install.  -BackportFolder is optional - a dump that already has the
-backport merged in needs only the base package.
+Both packages go to one -OutputFolder and are named from the title:
+
+    <TITLEID>.pkg            the base game
+    <TITLEID>-backport.pkg   the update
+
+The base is built from -GameFolder when it is not there yet and reused when it is,
+so a backport built in a later run references the very package this tool produced.
+-BackportFolder is optional: a dump that already has the backport merged in needs
+only the base package.
 
 Three constraints are enforced here because each one costs an install attempt:
 
@@ -29,26 +33,26 @@ Three constraints are enforced here because each one costs an install attempt:
    is dropped with a warning.
 
 .EXAMPLE
-Build only the base package (a dump that already has the backport merged in):
+Base package only (a dump that already has the backport merged in):
 
-.\build-backport.ps1 -GameFolder .\PPSA12345-app -BasePackage .\game.pkg
+.\build-backport.ps1 -GameFolder .\PPSA12345-app -OutputFolder .\out
 
 .EXAMPLE
-Build the backport update later, against the base package built above:
+The backport update later, against the base built above:
 
 .\build-backport.ps1 `
     -GameFolder .\PPSA12345-app `
     -BackportFolder '.\my backport files' `
-    -BasePackage .\game.pkg `
-    -OutputPackage .\game-backport.pkg
+    -OutputFolder .\out
+
 #>
 
 [CmdletBinding()]
 param(
     [string]$GameFolder,
     [string]$BackportFolder,
-    [Parameter(Mandatory = $true)][string]$BasePackage,
-    [string]$OutputPackage,
+    [Parameter(Mandatory = $true)][string]$OutputFolder,
+    [string]$Name,
     [switch]$RebuildBase,
     [string]$ContentVersion,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
@@ -173,47 +177,64 @@ foreach ($required in @($gp5Script, $infoScript, $metricScript, $publisher)) {
 
 $game = if ([string]::IsNullOrWhiteSpace($GameFolder)) { $null } else { Resolve-InputPath $GameFolder }
 $backport = Resolve-InputPath $BackportFolder
-$base = Resolve-InputPath $BasePackage
-$output = Resolve-InputPath $OutputPackage
+$outDir = Resolve-InputPath $OutputFolder
 
-# The base package is this tool's own artefact, not something you go and find. It is
-# built from the game folder when it is missing and reused when it is already there,
-# so building the backport separately references the very package that was built
-# here - which is what the console has to install.
 $buildUpdate = -not [string]::IsNullOrWhiteSpace($BackportFolder)
-$baseExists = (Test-Path -LiteralPath $base -PathType Leaf) -and -not $RebuildBase
-$createBase = -not $baseExists
 
-if ([IO.Path]::GetExtension($base) -ine '.pkg') {
-    throw 'BasePackage must be a .pkg path.'
-}
-if ($createBase -and -not $game) {
-    throw ("The base package does not exist yet, so it has to be built: -GameFolder is " +
-           "required. (Pass an existing $base to reuse it instead.)")
-}
 if ($game -and -not (Test-Path -LiteralPath $game -PathType Container)) {
     throw "GameFolder does not exist or is not a directory: $game"
 }
 if ($buildUpdate -and -not (Test-Path -LiteralPath $backport -PathType Container)) {
     throw "BackportFolder does not exist or is not a directory: $backport"
 }
+
+# Both packages land in one folder and are named from the title, so the pair stays
+# together and the update is always beside the base it was built against.
+function Get-OutputStem([string]$explicit, [string]$gameFolder) {
+    if (-not [string]::IsNullOrWhiteSpace($explicit)) { return $explicit }
+    if ($gameFolder) {
+        $param = Join-Path $gameFolder 'sce_sys\param.json'
+        if (Test-Path -LiteralPath $param -PathType Leaf) {
+            try {
+                $titleId = (Get-Content -LiteralPath $param -Raw -Encoding UTF8 | ConvertFrom-Json).titleId
+                if (-not [string]::IsNullOrWhiteSpace($titleId)) { return $titleId }
+            } catch {
+                # Fall through to the folder name; a malformed param.json is the
+                # gp5 stage's problem to report, not this one's.
+            }
+        }
+        return (Split-Path -Leaf $gameFolder.TrimEnd([char]92, [char]47))
+    }
+    throw 'Cannot work out a name for the packages: pass -Name, or -GameFolder to take it from param.json.'
+}
+
+$stem = Get-OutputStem $Name $game
+$base = Join-Path $outDir ($stem + '.pkg')
+$output = Join-Path $outDir ($stem + '-backport.pkg')
+
+$baseExists = (Test-Path -LiteralPath $base -PathType Leaf) -and -not $RebuildBase
+$createBase = -not $baseExists
+
+if ($createBase -and -not $game) {
+    throw ("No base package at $base, so it has to be built: -GameFolder is required.")
+}
 if ($buildUpdate) {
-    if ([string]::IsNullOrWhiteSpace($OutputPackage)) {
-        throw '-OutputPackage is required when -BackportFolder is given (it is where the update goes).'
-    }
-    if ([IO.Path]::GetExtension($output) -ine '.pkg') {
-        throw 'OutputPackage must be a .pkg path.'
-    }
-    if ($base -ieq $output) {
-        throw 'BasePackage and OutputPackage must be different files.'
-    }
     if ((Test-Path -LiteralPath $output) -and -not $Force) {
-        throw "Output already exists: $output (use -Force to replace it)"
+        throw "Update already exists: $output (use -Force to replace it)"
     }
 } elseif (-not $createBase) {
-    throw ("Nothing to do: the base package already exists and no -BackportFolder was " +
-           "given. Pass -RebuildBase to rebuild it, or a backport folder to build an update.")
+    throw ("Nothing to do: $base already exists and no -BackportFolder was given. " +
+           "Pass -RebuildBase to rebuild it, or a backport folder to build an update.")
 }
+
+if (-not (Test-Path -LiteralPath $outDir -PathType Container)) {
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+}
+
+Write-Step "Output"
+Write-Note "folder : $outDir"
+Write-Note "base   : $(Split-Path -Leaf $base)$(if ($baseExists) { '   (existing, reused)' } else { '   (will be built)' })"
+if ($buildUpdate) { Write-Note "update : $(Split-Path -Leaf $output)" }
 
 # ------------------------------------------------------------- base package
 if ($createBase) {

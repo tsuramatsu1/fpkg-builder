@@ -26,36 +26,35 @@ firmware 12.00.
 backport-builder.bat
 ```
 
-The base package is this tool's own artefact. `-BasePackage` says where it lives:
-it is **built from the game folder when it is missing, and reused when it is there**.
-You never browse for someone else's base package, because a delta only applies to
-the exact build it was made against.
+Both packages go to **one output folder**, named from the title:
 
-The backport step is optional — a dump that already has the backport merged in
-needs only the base package.
+```
+<TITLEID>.pkg            the base game
+<TITLEID>-backport.pkg   the update
+```
+
+The base is built from the game folder when it is not there yet, and reused when it
+is — so a backport built in a later run references the very package the tool made.
+The backport step is optional: a dump that already has it merged in needs only the
+base package.
 
 ```powershell
 # 1. base package only
-.\build-backport.ps1 -GameFolder .\PPSA12345-app -BasePackage .\game.pkg
+.\build-backport.ps1 -GameFolder .\PPSA12345-app -OutputFolder .\out
 
-# 2. later, the backport update against that same base
+# 2. later, the update - into the same folder, against that same base
 .\build-backport.ps1 `
     -GameFolder     .\PPSA12345-app `
     -BackportFolder '.\my backport files' `
-    -BasePackage    .\game.pkg `
-    -OutputPackage  .\game-backport.pkg
+    -OutputFolder   .\out
 ```
-
-Step 2 reuses `game.pkg` rather than rebuilding it, so the update references the
-package step 1 produced. Both can also be done in one run by giving the backport
-folder the first time.
 
 | Parameter | |
 | --- | --- |
+| `-OutputFolder` | **Required.** Where both packages are written. |
 | `-GameFolder` | The game dump. Required when the base package has to be built. |
-| `-BasePackage` | **Required.** Where the base package lives; built if missing, reused if present. |
 | `-BackportFolder` | Optional. Omit it to build only the base package. |
-| `-OutputPackage` | Where to write the update. Required with `-BackportFolder`. |
+| `-Name` | Package name stem. Defaults to the title id from `param.json`. |
 | `-RebuildBase` | Rebuild the base package even if it already exists. |
 | `-ContentVersion` | Optional. Defaults to the base version, bumped. |
 | `-CompressionLevel` | `-4`..`9`, default `7`. |
