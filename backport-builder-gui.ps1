@@ -61,11 +61,12 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $root = New-Object System.Windows.Forms.TableLayoutPanel
 $root.Dock = 'Fill'
 $root.ColumnCount = 1
-$root.RowCount = 4
+$root.RowCount = 5
 $root.Padding = New-Object System.Windows.Forms.Padding(12)
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$form.Controls.Add($root)
 
@@ -223,6 +224,15 @@ $status.Text = 'Ready'
 $status.AutoSize = $true
 $status.Margin = New-Object System.Windows.Forms.Padding(16, 11, 0, 0)
 [void]$actions.Controls.Add($status)
+
+# ------------------------------------------------------------------ footer
+$footer = New-Object System.Windows.Forms.Label
+$footer.Text = 'Drakmor and Tsuramatsu'
+$footer.AutoSize = $true
+$footer.Anchor = 'Right'
+$footer.ForeColor = [System.Drawing.SystemColors]::GrayText
+$footer.Margin = New-Object System.Windows.Forms.Padding(0, 8, 2, 0)
+[void]$root.Controls.Add($footer, 0, 4)
 
 # ------------------------------------------------------------------ helpers
 function Append-Log([string]$line) {

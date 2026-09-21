@@ -123,3 +123,7 @@ Again later: `python .\scripts\pkg-metric.py .\game-backport.pkg.naps_metric.jso
 | --- | --- |
 | `scripts/pkg-info.py` | Container kind, digest and `param.json` of a package. |
 | `scripts/pkg-metric.py` | What a built package actually carries. |
+
+---
+
+Drakmor and Tsuramatsu
