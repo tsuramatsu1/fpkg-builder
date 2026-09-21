@@ -10,9 +10,10 @@ patch against the exact base package the console installed from.  The result
 carries only the changed files; every unchanged file is referenced from the base
 image.
 
--GameFolder is optional.  Omit it and the reference package is unpacked instead,
-since it already contains every file the GP5 has to describe - so an update can
-be built from nothing but the base package and the backport files.
+-ReferencePackage is always required: a delta stores block references into that
+exact image and the console validates its digest before merging.  -GameFolder is
+optional and only supplies the build tree, saving an unpack of the reference; it
+cannot stand in for the reference.
 
 Three constraints are enforced here because each one costs an install attempt:
 
@@ -39,7 +40,6 @@ param(
     [Parameter(Mandatory = $true)][string]$BackportFolder,
     [string]$ReferencePackage,
     [Parameter(Mandatory = $true)][string]$OutputPackage,
-    [string]$BasePackage,
     [string]$ContentVersion,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
     [string]$WorkFolder,
@@ -123,11 +123,16 @@ $backport = Resolve-InputPath $BackportFolder
 $reference = if ([string]::IsNullOrWhiteSpace($ReferencePackage)) { $null } else { Resolve-InputPath $ReferencePackage }
 $output = Resolve-InputPath $OutputPackage
 
-# Source the game from either a folder or a package. With only a folder the base
-# package is built here, because a delta must reference one and the console has to
-# install that exact build - base and update ship as a matched pair.
-if (-not $game -and -not $reference) {
-    throw 'Supply -GameFolder or -ReferencePackage (a game folder or a base .pkg).'
+# A delta is defined against a package: it stores block references into that exact
+# image and the console validates its digest before merging. So the base package is
+# always required. -GameFolder only supplies the build tree, saving an unpack; it
+# cannot stand in for the reference, and this tool will not build a full game
+# package to manufacture one.
+if (-not $reference) {
+    throw ('-ReferencePackage is required: it is the package the console installed, ' +
+           'and the update is built as a set of references into it. A game folder ' +
+           'cannot replace it. If no base package exists, build one with the ' +
+           "toolkit's build-from-folder.ps1 and install THAT on the console first.")
 }
 if ($game -and -not (Test-Path -LiteralPath $game -PathType Container)) {
     throw "GameFolder does not exist or is not a directory: $game"
@@ -146,34 +151,6 @@ if ($reference -and $reference -ieq $output) {
 }
 if ((Test-Path -LiteralPath $output) -and -not $Force) {
     throw "Output already exists: $output (use -Force to replace it)"
-}
-
-# ------------------------------------------------------------- base package
-if (-not $reference) {
-    $base = if ([string]::IsNullOrWhiteSpace($BasePackage)) {
-        Join-Path (Split-Path -Parent $output) ([IO.Path]::GetFileNameWithoutExtension($output) + '-base.pkg')
-    } else {
-        Resolve-InputPath $BasePackage
-    }
-    if ($base -ieq $output) { throw 'BasePackage and OutputPackage must be different files.' }
-    $fromFolder = Join-Path $toolkit 'build-from-folder.ps1'
-    if (-not (Test-Path -LiteralPath $fromFolder -PathType Leaf)) {
-        throw "No -ReferencePackage given and the toolkit's build-from-folder.ps1 is missing: $fromFolder"
-    }
-    Write-Step "No base package given - building one from the game folder"
-    Write-Note "This writes the full game package and takes a few minutes."
-    Write-Note $base
-    $buildArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fromFolder,
-                   '-SourceFolder', $game, '-OutputPackage', $base,
-                   '-CompressionLevel', [string]$CompressionLevel)
-    if ($Force) { $buildArgs += '-Force' }
-    & (Get-Command powershell.exe).Source @buildArgs 2>&1 | ForEach-Object { Write-Note $_ }
-    if ($LASTEXITCODE -ne 0) { throw "Base package build failed with exit code $LASTEXITCODE" }
-    if (-not (Test-Path -LiteralPath $base -PathType Leaf)) {
-        throw "Base package build reported success but produced nothing at $base"
-    }
-    $reference = $base
-    Write-Note 'Install THIS base package on the console; the update applies only to it.'
 }
 
 # ---------------------------------------------------------------- reference

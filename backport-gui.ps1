@@ -108,9 +108,9 @@ function Add-PathRow {
     return [PSCustomObject]@{ TextBox = $text; BrowseButton = $browse }
 }
 
-$gameRow = Add-PathRow -Row 0 -LabelText 'Game folder:'
+$gameRow = Add-PathRow -Row 0 -LabelText 'Game folder (optional):'
 $backportRow = Add-PathRow -Row 1 -LabelText 'Backport files folder:'
-$referenceRow = Add-PathRow -Row 2 -LabelText 'or Base PKG:'
+$referenceRow = Add-PathRow -Row 2 -LabelText 'Base PKG (required):'
 $outputRow = Add-PathRow -Row 3 -LabelText 'Output update (.pkg):'
 
 $txtGame = $gameRow.TextBox
@@ -119,7 +119,7 @@ $txtReference = $referenceRow.TextBox
 $txtOutput = $outputRow.TextBox
 
 $gameHint = New-Object System.Windows.Forms.Label
-$gameHint.Text = 'Give a game folder OR a base PKG. With a folder the base PKG is built first (slower); with a PKG it is unpacked.'
+$gameHint.Text = 'The base PKG is the one the console installed - the update is built as references into it. A game folder only saves unpacking it.'
 $gameHint.AutoSize = $true
 $gameHint.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 6)
 $pathGrid.RowCount = 5
@@ -361,8 +361,9 @@ $btnBuild.Add_Click({
     $backport = $txtBackport.Text.Trim()
     $reference = $txtReference.Text.Trim()
     $output = $txtOutput.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($game) -and [string]::IsNullOrWhiteSpace($reference)) {
-        Show-Error 'Choose either a game folder or a base PKG.'
+    if ([string]::IsNullOrWhiteSpace($reference)) {
+        Show-Error ('A base PKG is required - it is the package the console installed, and ' +
+                    'the update is built as references into it. A game folder cannot replace it.')
         return
     }
     if ([string]::IsNullOrWhiteSpace($backport) -or [string]::IsNullOrWhiteSpace($output)) {

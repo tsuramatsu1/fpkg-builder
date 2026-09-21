@@ -40,27 +40,24 @@ Or from the command line:
     -OutputPackage    .\syphon-backport-4xx.pkg
 ```
 
-**Give it either a game folder or a base package.**
+**The base package is always required.** A delta stores block references into that
+exact image, and the console validates its digest before merging — so there is no
+building an update without it. It must be the package the console installed.
 
-* **A base package** is the direct route. It already contains every file the GP5
-  has to describe, so the builder unpacks it and uses that as the build tree — you
-  do not need the game files at all.
-* **A game folder** works too: the builder makes the base package first (written
-  next to the output as `<name>-base.pkg`, or wherever `-BasePackage` says) and
-  builds the update against it. That costs a full package build, but it is the only
-  option when no base package exists — and you need one regardless, because the
-  console has to install that exact build.
+`-GameFolder` is optional and only supplies the build tree, saving an unpack of the
+reference. It cannot stand in for the base package, and this tool will not build a
+full game package to manufacture one: that would be a multi-GB build producing a
+base you would then have to install anyway.
 
-Supplying both uses the package as the reference and the folder as the build tree,
-which skips the unpack.
+If no base package exists yet, build one with the toolkit's `build-from-folder.ps1`
+and install **that** on the console first. Then it becomes your reference.
 
 | Parameter | Meaning |
 | --- | --- |
-| `-GameFolder` | The game dump. Needed only when no `-ReferencePackage` is given. |
+| `-GameFolder` | Optional. Only saves unpacking the reference; cannot replace it. |
 | `-BackportFolder` | The backport file set, laid out as it sits in the game root. |
-| `-ReferencePackage` | **The exact `.pkg` the console installed.** Needed only when no `-GameFolder` is given. See below. |
+| `-ReferencePackage` | **Required. The exact `.pkg` the console installed.** See below. |
 | `-OutputPackage` | Where to write the update. |
-| `-BasePackage` | Where to write the base package when building from a game folder. |
 | `-ContentVersion` | Optional; defaults to the base version with the last field bumped. |
 | `-CompressionLevel` | `-4`..`9`, default `7`. |
 | `-WorkFolder` | Optional; defaults to a temp folder that is removed afterwards. |
@@ -92,8 +89,8 @@ If you no longer have the base package that matches what is **already installed*
 you cannot recreate it — a fresh build of the same folder has a different digest.
 Keep the base package you installed alongside the update.
 
-You can still build a *new* pair from a game folder: the tool makes a base package
-and an update that matches it. That means reinstalling the base on the console.
+You can still make a *new* pair by hand: build a base package from the game folder
+with `build-from-folder.ps1`, install it, then build the update against it.
 
 ## What the builder handles for you
 
@@ -160,5 +157,5 @@ After a successful merge on PPSA06323, `app.pkg` grew from 2,442,133,504 to
 * `requiredSystemSoftwareVersion` is rewritten to `0x0500000000000000` by the
   publisher and cannot be overridden from `param.json`.
 * A package built *without* a reference installs as a full application and
-  replaces the whole title. This tool always builds against one — supplying a game
-  folder instead of a package just means it builds the reference first.
+  replaces the whole title. This tool always builds against one, which is why the
+  base package is required rather than optional.
