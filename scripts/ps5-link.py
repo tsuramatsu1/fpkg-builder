@@ -179,6 +179,65 @@ def cmd_push(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_survey(args: argparse.Namespace) -> int:
+    """Report, for every installed title, what it was installed from.
+
+    A delta update can only be built for a title installed from an fPKG, and only
+    against that exact package.  ``app.json`` records it in ``pieces[0].url``, so
+    this says per title whether a usable base is still reachable.
+    """
+    ftp = connect(args.host, args.port, args.timeout)
+    listing: list[str] = []
+    ftp.retrlines("LIST /user/app", listing.append)
+    titles = []
+    for line in listing:
+        parts = line.split(None, 8)
+        if len(parts) >= 9 and parts[8] not in (".", "..") and line[0] == "d":
+            titles.append(parts[8])
+    titles.sort()
+
+    rows = []
+    for title in titles:
+        raw = read_text(ftp, f"/user/app/{title}/app.json")
+        source = None
+        fake = None
+        if raw:
+            try:
+                app = json.loads(raw)
+                fake = app.get("fake")
+                pieces = app.get("pieces") or []
+                if pieces:
+                    source = pieces[0].get("url")
+            except json.JSONDecodeError:
+                pass
+        available = None
+        if source:
+            try:
+                available = ftp.size(source) is not None
+            except Exception:
+                available = False
+        rows.append({"titleId": title, "installedFrom": source,
+                     "fake": fake, "sourceAvailable": available})
+    ftp.close()
+
+    usable = [r for r in rows if r["sourceAvailable"]]
+    if args.json:
+        json.dump({"titles": rows, "withUsableBase": len(usable)}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    print(f"{'titleId':<12} {'base':<6} installed from")
+    for row in rows:
+        if args.only_usable and not row["sourceAvailable"]:
+            continue
+        mark = "yes" if row["sourceAvailable"] else ("gone" if row["installedFrom"] else "-")
+        print(f"{row['titleId']:<12} {mark:<6} {row['installedFrom'] or '(no app.json)'}")
+    print()
+    print(f"{len(rows)} installed, {len(usable)} with the source package still present.")
+    print("Only those can take a delta update built against that package.")
+    return 0
+
+
 def cmd_ls(args: argparse.Namespace) -> int:
     ftp = connect(args.host, args.port, args.timeout)
     lines: list[str] = []
@@ -213,6 +272,12 @@ def main() -> None:
     push.add_argument("--remote", required=True)
     push.add_argument("--verify", action="store_true")
     push.set_defaults(func=cmd_push)
+
+    survey = sub.add_parser("survey", help="what every installed title was installed from")
+    survey.add_argument("--json", action="store_true")
+    survey.add_argument("--only-usable", action="store_true",
+                        help="list only titles whose source package is still present")
+    survey.set_defaults(func=cmd_survey)
 
     listing = sub.add_parser("ls", help="list a directory")
     listing.add_argument("--remote", required=True)
