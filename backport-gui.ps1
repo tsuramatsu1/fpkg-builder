@@ -31,6 +31,8 @@ $script:stderrEnded = $true
 $script:operation = 'Build'
 $script:referenceDigest = $null
 $script:lastOutput = $null
+$script:workFolder = $null
+$script:cancelled = $false
 
 function Show-Error([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -222,6 +224,20 @@ function Append-Log([string]$line) {
     $log.AppendText([Environment]::NewLine)
 }
 
+function Remove-WorkFolder {
+    if ([string]::IsNullOrWhiteSpace($script:workFolder)) { return }
+    if (-not (Test-Path -LiteralPath $script:workFolder)) { $script:workFolder = $null; return }
+    try {
+        $bytes = (Get-ChildItem -LiteralPath $script:workFolder -Recurse -File -ErrorAction SilentlyContinue |
+                  Measure-Object -Property Length -Sum).Sum
+        Remove-Item -LiteralPath $script:workFolder -Recurse -Force -ErrorAction Stop
+        if ($bytes) { Append-Log ("Removed work folder ({0:N0} bytes reclaimed)." -f $bytes) }
+    } catch {
+        Append-Log "Could not remove the work folder: $script:workFolder"
+    }
+    $script:workFolder = $null
+}
+
 function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
@@ -346,7 +362,11 @@ $timer.Add_Tick({
         $code = $script:process.ExitCode
         $script:process = $null
         Set-Busy $false
-        if ($code -eq 0) {
+        if ($script:cancelled -or $code -ne 0) { Remove-WorkFolder }
+        if ($script:cancelled) {
+            $status.Text = 'Cancelled'
+            Append-Log 'Cancelled.'
+        } elseif ($code -eq 0) {
             $status.Text = 'Update built successfully'
             Append-Log ''
             Append-Log 'Done. Copy the update to the console and install it over the base game.'
@@ -370,9 +390,12 @@ $btnBuild.Add_Click({
         Show-Error 'Fill in the backport folder and the output path.'
         return
     }
+    $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("backport-gui-" + [Guid]::NewGuid().ToString('N'))
+    $script:cancelled = $false
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $builderScript,
         '-BackportFolder', $backport, '-OutputPackage', $output,
+        '-WorkFolder', $script:workFolder,
         '-CompressionLevel', [string]$cmbCompression.SelectedItem, '-Force')
     if (-not [string]::IsNullOrWhiteSpace($game)) { $arguments += @('-GameFolder', $game) }
     if (-not [string]::IsNullOrWhiteSpace($reference)) { $arguments += @('-ReferencePackage', $reference) }
@@ -403,9 +426,19 @@ $btnBuild.Add_Click({
 })
 
 $btnCancel.Add_Click({
-    if ($null -ne $script:process -and -not $script:process.HasExited) {
+    if ($null -eq $script:process -or $script:process.HasExited) { return }
+    $script:cancelled = $true
+    $btnCancel.Enabled = $false
+    $status.Text = 'Cancelling...'
+    Append-Log 'Cancelling - stopping the publisher and its child processes...'
+    # taskkill /T walks the process tree. Process.Kill() on .NET Framework stops only
+    # the powershell wrapper and leaves prospero-pub-cmd.exe running to completion.
+    try {
+        Start-Process -FilePath 'taskkill.exe' `
+            -ArgumentList @('/PID', [string]$script:process.Id, '/T', '/F') `
+            -NoNewWindow -Wait -ErrorAction Stop | Out-Null
+    } catch {
         try { $script:process.Kill() } catch { }
-        Append-Log 'Cancelled.'
     }
 })
 
