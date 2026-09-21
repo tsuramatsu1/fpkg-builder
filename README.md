@@ -49,6 +49,12 @@ reference. It cannot stand in for the base package, and this tool will not build
 full game package to manufacture one: that would be a multi-GB build producing a
 base you would then have to install anyway.
 
+When the game folder is on the same volume as the work folder, the build tree is
+**hard-linked rather than copied** — instant, and no second copy of a multi-GB dump.
+The build only replaces whole files, and every writer deletes its target first so a
+link is broken instead of written through into your source tree. Across volumes it
+falls back to copying; point `-WorkFolder` at the game's drive to get linking.
+
 If no base package exists yet, build one with the toolkit's `build-from-folder.ps1`
 and install **that** on the console first. Then it becomes your reference.
 
@@ -94,8 +100,8 @@ with `build-from-folder.ps1`, install it, then build the update against it.
 
 ## What the builder handles for you
 
-* Copies the game folder — or unpacks the base package when no folder is given —
-  and overlays the backport onto that copy; your source tree is never modified.
+* Links (or copies) the game folder — or unpacks the base package when no folder
+  is given — and overlays the backport onto that tree; your source is never modified.
 * Removes `playgo-languages/` from the build tree. It generates those payloads
   itself, and a copy carried in from an unpacked package collides with the
   generated one: `invalid attribute value dst_path="playgo-languages/..."`.

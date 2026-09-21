@@ -95,6 +95,49 @@ function Resolve-InputPath([string]$path) {
     return [IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $path))
 }
 
+function New-LinkedTree([string]$source, [string]$destination) {
+    <#
+        Mirror a tree using hard links instead of copying the bytes. The build only
+        ever replaces whole files, so the links are read-only in practice - but every
+        writer in this script must delete a link before writing, or it would write
+        through the link into the caller's source tree.
+
+        Hard links cannot cross volumes; the caller checks that first.
+    #>
+    $sourceRoot = $source.TrimEnd('\', '/')
+    $linked = 0
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory | ForEach-Object {
+        $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
+        New-Item -ItemType Directory -Force -Path (Join-Path $destination $relative) | Out-Null
+    }
+    Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
+        $target = Join-Path $destination $relative
+        New-Item -ItemType HardLink -Path $target -Value $_.FullName -ErrorAction Stop | Out-Null
+        $linked++
+    }
+    return $linked
+}
+
+function Set-BuildTreeFile {
+    <#
+        Replace a file in the build tree. Removes the existing entry first so a hard
+        link is broken rather than written through into the source tree.
+    #>
+    param([string]$Path, [string]$FromFile, [string]$Content)
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
+    if ($PSBoundParameters.ContainsKey('FromFile')) {
+        Copy-Item -LiteralPath $FromFile -Destination $Path -Force
+    } else {
+        [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding($false)))
+    }
+}
+
 function Write-Step([string]$message) { Write-Host "==> $message" }
 function Write-Note([string]$message) { Write-Host "    $message" }
 function Write-Warn([string]$message) { Write-Warning $message }
@@ -200,13 +243,34 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $exitCode = 1
 try {
     if ($game) {
-        Write-Step "Copying game folder to work tree"
-        Write-Note $overlay
-        $robo = Start-Process -FilePath 'robocopy.exe' `
-            -ArgumentList @($game, $overlay, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/MT:16') `
-            -NoNewWindow -Wait -PassThru
-        # robocopy uses a bitmask: < 8 means success, >= 8 is a real failure.
-        if ($robo.ExitCode -ge 8) { throw "robocopy failed with exit code $($robo.ExitCode)" }
+        # Link rather than copy when possible: the build tree is only ever read from
+        # and whole-file replaced, so duplicating a multi-GB dump buys nothing.
+        $sameVolume = [IO.Path]::GetPathRoot($game) -ieq [IO.Path]::GetPathRoot($work)
+        $linked = $false
+        if ($sameVolume) {
+            Write-Step "Linking game folder into work tree"
+            Write-Note $overlay
+            try {
+                $count = New-LinkedTree $game $overlay
+                Write-Note "$count file(s) hard-linked; no data copied."
+                $linked = $true
+            } catch {
+                Write-Warn "Hard-linking failed ($($_.Exception.Message)); falling back to a copy."
+                Remove-Item -LiteralPath $overlay -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        } else {
+            Write-Note "Game folder and work folder are on different volumes; copying."
+            Write-Note "Use -WorkFolder on the same drive as the game to link instead."
+        }
+        if (-not $linked) {
+            Write-Step "Copying game folder to work tree"
+            Write-Note $overlay
+            $robo = Start-Process -FilePath 'robocopy.exe' `
+                -ArgumentList @($game, $overlay, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/MT:16') `
+                -NoNewWindow -Wait -PassThru
+            # robocopy uses a bitmask: < 8 means success, >= 8 is a real failure.
+            if ($robo.ExitCode -ge 8) { throw "robocopy failed with exit code $($robo.ExitCode)" }
+        }
     } else {
         # No game folder supplied: the reference package already contains every file
         # the GP5 must describe, so unpack it and use that as the build tree.
@@ -221,6 +285,7 @@ try {
     # The builder regenerates the PlayGo language payloads, so a copy carried in
     # from an extracted package collides with the generated one and the publisher
     # rejects the GP5 with: invalid attribute value dst_path="playgo-languages/...".
+    # Removing links only unlinks them; the source tree keeps its own entries.
     $languages = Join-Path $overlay 'playgo-languages'
     if (Test-Path -LiteralPath $languages) {
         Remove-Item -LiteralPath $languages -Recurse -Force
@@ -246,11 +311,7 @@ try {
             return
         }
         $target = Join-Path $overlay $relative
-        $parent = Split-Path -Parent $target
-        if (-not (Test-Path -LiteralPath $parent)) {
-            New-Item -ItemType Directory -Force -Path $parent | Out-Null
-        }
-        Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+        Set-BuildTreeFile -Path $target -FromFile $_.FullName
         $applied += $relative
     }
     foreach ($item in $applied) { Write-Note "+ $item" }
@@ -273,7 +334,7 @@ try {
     if ($patched -eq $paramText) {
         throw "Could not set contentVersion in $paramPath"
     }
-    [IO.File]::WriteAllText($paramPath, $patched, (New-Object Text.UTF8Encoding($false)))
+    Set-BuildTreeFile -Path $paramPath -Content $patched
 
     Write-Step "Generating GP5"
     $gp5 = Join-Path $work 'project.gp5'
