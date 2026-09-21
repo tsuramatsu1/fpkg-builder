@@ -78,18 +78,9 @@ For distribution this means shipping the base package and the update as a
 matched pair. An update built against your base will not apply to somebody
 else's separately-built copy of the same game.
 
-If you no longer have the base package, pull it off the console. `app.json` in
-`/user/app/<TITLEID>/` names the file it was installed from:
-
-```powershell
-python .\scripts\ps5-link.py --host 192.168.1.50 info --title-id PPSA06323
-python .\scripts\ps5-link.py --host 192.168.1.50 pull `
-    --remote /mnt/usb0/siphon.pkg --local .\siphon-base.pkg
-```
-
-The GUI's **Check console** button does the comparison for you and says plainly
-whether the chosen reference matches what is installed. Console FTP runs at
-roughly 117 MB/s, so pulling a 2.4 GB base takes about 20 seconds.
+If you no longer have the base package you cannot rebuild it: the publisher's
+output is not reproducible, so a fresh build of the same folder has a different
+digest. Keep the base package you installed alongside the update.
 
 ## What the builder handles for you
 
@@ -146,7 +137,6 @@ After a successful merge on PPSA06323, `app.pkg` grew from 2,442,133,504 to
 | --- | --- |
 | `scripts/pkg-info.py` | Container kind, digest and `param.json` of a package. |
 | `scripts/pkg-metric.py` | What a built package carries, from its metric file. |
-| `scripts/ps5-link.py` | Console FTP: `info`, `pull`, `push`, `ls`. |
 
 ## Limits
 
