@@ -40,17 +40,27 @@ Or from the command line:
     -OutputPackage    .\syphon-backport-4xx.pkg
 ```
 
-**You do not need the game files.** The base package already contains every file
-the GP5 has to describe, so when `-GameFolder` is omitted the builder unpacks the
-reference package and uses that as the build tree. All you need is the base
-package and the backport file set. Supplying `-GameFolder` just skips the unpack.
+**Give it either a game folder or a base package.**
+
+* **A base package** is the direct route. It already contains every file the GP5
+  has to describe, so the builder unpacks it and uses that as the build tree — you
+  do not need the game files at all.
+* **A game folder** works too: the builder makes the base package first (written
+  next to the output as `<name>-base.pkg`, or wherever `-BasePackage` says) and
+  builds the update against it. That costs a full package build, but it is the only
+  option when no base package exists — and you need one regardless, because the
+  console has to install that exact build.
+
+Supplying both uses the package as the reference and the folder as the build tree,
+which skips the unpack.
 
 | Parameter | Meaning |
 | --- | --- |
-| `-GameFolder` | Optional. The game dump, if you have it; otherwise the base package is unpacked. |
+| `-GameFolder` | The game dump. Needed only when no `-ReferencePackage` is given. |
 | `-BackportFolder` | The backport file set, laid out as it sits in the game root. |
-| `-ReferencePackage` | **The exact `.pkg` the console installed.** See below. |
+| `-ReferencePackage` | **The exact `.pkg` the console installed.** Needed only when no `-GameFolder` is given. See below. |
 | `-OutputPackage` | Where to write the update. |
+| `-BasePackage` | Where to write the base package when building from a game folder. |
 | `-ContentVersion` | Optional; defaults to the base version with the last field bumped. |
 | `-CompressionLevel` | `-4`..`9`, default `7`. |
 | `-WorkFolder` | Optional; defaults to a temp folder that is removed afterwards. |
@@ -78,9 +88,12 @@ For distribution this means shipping the base package and the update as a
 matched pair. An update built against your base will not apply to somebody
 else's separately-built copy of the same game.
 
-If you no longer have the base package you cannot rebuild it: the publisher's
-output is not reproducible, so a fresh build of the same folder has a different
-digest. Keep the base package you installed alongside the update.
+If you no longer have the base package that matches what is **already installed**,
+you cannot recreate it — a fresh build of the same folder has a different digest.
+Keep the base package you installed alongside the update.
+
+You can still build a *new* pair from a game folder: the tool makes a base package
+and an update that matches it. That means reinstalling the base on the console.
 
 ## What the builder handles for you
 
@@ -147,4 +160,5 @@ After a successful merge on PPSA06323, `app.pkg` grew from 2,442,133,504 to
 * `requiredSystemSoftwareVersion` is rewritten to `0x0500000000000000` by the
   publisher and cannot be overridden from `param.json`.
 * A package built *without* a reference installs as a full application and
-  replaces the whole title. That is why `-ReferencePackage` is mandatory here.
+  replaces the whole title. This tool always builds against one — supplying a game
+  folder instead of a package just means it builds the reference first.

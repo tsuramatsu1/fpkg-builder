@@ -23,27 +23,6 @@ $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $builderScript = Join-Path $repoRoot 'build-backport-update.ps1'
 $infoScript = Join-Path $repoRoot 'scripts\pkg-info.py'
 
-function Test-ToolkitRoot([string]$candidate) {
-    if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
-    if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { return $false }
-    return (Test-Path -LiteralPath (Join-Path $candidate 'scripts\create-gp5-from-folder.py') -PathType Leaf) -and
-           (Test-Path -LiteralPath (Join-Path $candidate 'toolchain\prospero-pub-cmd.exe') -PathType Leaf)
-}
-
-function Find-ToolkitRoot {
-    # Mirrors the discovery in build-backport-update.ps1; used here only to locate
-    # build-from-folder.ps1 for the "Build base PKG" action.
-    $candidates = @($env:PS5_FPKG_TOOLKIT, $repoRoot, (Join-Path $repoRoot 'fpkg converter'))
-    $documents = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
-    if (-not [string]::IsNullOrWhiteSpace($documents)) {
-        $candidates += (Join-Path $documents 'PS5JB\fpkg converter')
-    }
-    foreach ($candidate in $candidates) {
-        if (Test-ToolkitRoot $candidate) { return [IO.Path]::GetFullPath($candidate) }
-    }
-    return $null
-}
-
 $script:process = $null
 $script:stdoutTask = $null
 $script:stderrTask = $null
@@ -129,9 +108,9 @@ function Add-PathRow {
     return [PSCustomObject]@{ TextBox = $text; BrowseButton = $browse }
 }
 
-$gameRow = Add-PathRow -Row 0 -LabelText 'Game folder (optional):'
+$gameRow = Add-PathRow -Row 0 -LabelText 'Game folder:'
 $backportRow = Add-PathRow -Row 1 -LabelText 'Backport files folder:'
-$referenceRow = Add-PathRow -Row 2 -LabelText 'Base PKG (installed build):'
+$referenceRow = Add-PathRow -Row 2 -LabelText 'or Base PKG:'
 $outputRow = Add-PathRow -Row 3 -LabelText 'Output update (.pkg):'
 
 $txtGame = $gameRow.TextBox
@@ -140,7 +119,7 @@ $txtReference = $referenceRow.TextBox
 $txtOutput = $outputRow.TextBox
 
 $gameHint = New-Object System.Windows.Forms.Label
-$gameHint.Text = 'Leave the game folder blank to unpack the base PKG instead - it already contains every file.'
+$gameHint.Text = 'Give a game folder OR a base PKG. With a folder the base PKG is built first (slower); with a PKG it is unpacked.'
 $gameHint.AutoSize = $true
 $gameHint.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 6)
 $pathGrid.RowCount = 5
@@ -215,13 +194,6 @@ $btnBuild.AutoSize = $true
 $btnBuild.MinimumSize = New-Object System.Drawing.Size(150, 32)
 [void]$actions.Controls.Add($btnBuild)
 
-$btnBuildBase = New-Object System.Windows.Forms.Button
-$btnBuildBase.Text = 'Build base PKG'
-$btnBuildBase.AutoSize = $true
-$btnBuildBase.MinimumSize = New-Object System.Drawing.Size(150, 32)
-$btnBuildBase.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
-[void]$actions.Controls.Add($btnBuildBase)
-
 $btnInspect = New-Object System.Windows.Forms.Button
 $btnInspect.Text = 'Inspect base PKG'
 $btnInspect.AutoSize = $true
@@ -252,7 +224,6 @@ function Append-Log([string]$line) {
 
 function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
-    $btnBuildBase.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
     $btnCancel.Enabled = $busy
 }
@@ -341,46 +312,6 @@ $outputRow.BrowseButton.Add_Click({
 
 $btnInspect.Add_Click({ [void](Inspect-Reference) })
 
-$btnBuildBase.Add_Click({
-    # For when there is no base package yet: build one from the game dump, so the
-    # base and the update can be shipped as the matched pair the console requires.
-    $game = $txtGame.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($game)) {
-        Show-Error 'Set the game folder first - a base package is built from the game files.'
-        return
-    }
-    if (-not (Test-Path -LiteralPath $game -PathType Container)) {
-        Show-Error "Game folder not found: $game"; return
-    }
-    $toolkit = Find-ToolkitRoot
-    if (-not $toolkit) {
-        Show-Error 'Could not locate the publishing toolkit. Set PS5_FPKG_TOOLKIT.'; return
-    }
-    $fromFolder = Join-Path $toolkit 'build-from-folder.ps1'
-    if (-not (Test-Path -LiteralPath $fromFolder -PathType Leaf)) {
-        Show-Error "Missing $fromFolder"; return
-    }
-    $savePkg.FileName = 'base.pkg'
-    if ($savePkg.ShowDialog($form) -ne 'OK') { return }
-    $target = $savePkg.FileName
-    Append-Log "Building base package from $game"
-    Append-Log 'This writes the full game package and takes a few minutes.'
-    $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fromFolder,
-                   '-SourceFolder', $game, '-OutputPackage', $target,
-                   '-CompressionLevel', [string]$cmbCompression.SelectedItem, '-Force')
-    $result = Invoke-Tool -FilePath (Get-Command powershell.exe).Source `
-        -Arguments $arguments -Activity 'Building base package...'
-    if ($result.ExitCode -eq 0 -and (Test-Path -LiteralPath $target -PathType Leaf)) {
-        $txtReference.Text = $target
-        Append-Log ''
-        Append-Log 'Base package built and selected as the reference.'
-        Append-Log 'Install THIS package on the console; the update only applies to this exact build.'
-        [void](Inspect-Reference)
-    } else {
-        Append-Log 'Base package build failed.'
-    }
-})
-
 # ------------------------------------------------------------------ build
 function Pump-Output {
     foreach ($pair in @(@('stdoutTask', 'stdoutEnded'), @('stderrTask', 'stderrEnded'))) {
@@ -430,16 +361,20 @@ $btnBuild.Add_Click({
     $backport = $txtBackport.Text.Trim()
     $reference = $txtReference.Text.Trim()
     $output = $txtOutput.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($game) -or [string]::IsNullOrWhiteSpace($backport) -or
-        [string]::IsNullOrWhiteSpace($reference) -or [string]::IsNullOrWhiteSpace($output)) {
-        Show-Error 'Fill in the game folder, backport folder, base PKG and output path.'
+    if ([string]::IsNullOrWhiteSpace($game) -and [string]::IsNullOrWhiteSpace($reference)) {
+        Show-Error 'Choose either a game folder or a base PKG.'
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($backport) -or [string]::IsNullOrWhiteSpace($output)) {
+        Show-Error 'Fill in the backport folder and the output path.'
         return
     }
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $builderScript,
-        '-GameFolder', $game, '-BackportFolder', $backport,
-        '-ReferencePackage', $reference, '-OutputPackage', $output,
+        '-BackportFolder', $backport, '-OutputPackage', $output,
         '-CompressionLevel', [string]$cmbCompression.SelectedItem, '-Force')
+    if (-not [string]::IsNullOrWhiteSpace($game)) { $arguments += @('-GameFolder', $game) }
+    if (-not [string]::IsNullOrWhiteSpace($reference)) { $arguments += @('-ReferencePackage', $reference) }
     if (-not [string]::IsNullOrWhiteSpace($txtVersion.Text)) {
         $arguments += @('-ContentVersion', $txtVersion.Text.Trim())
     }

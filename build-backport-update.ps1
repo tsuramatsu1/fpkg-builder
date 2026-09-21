@@ -37,8 +37,9 @@ Three constraints are enforced here because each one costs an install attempt:
 param(
     [string]$GameFolder,
     [Parameter(Mandatory = $true)][string]$BackportFolder,
-    [Parameter(Mandatory = $true)][string]$ReferencePackage,
+    [string]$ReferencePackage,
     [Parameter(Mandatory = $true)][string]$OutputPackage,
+    [string]$BasePackage,
     [string]$ContentVersion,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
     [string]$WorkFolder,
@@ -119,26 +120,60 @@ foreach ($required in @($gp5Script, $infoScript, $metricScript, $publisher)) {
 
 $game = if ([string]::IsNullOrWhiteSpace($GameFolder)) { $null } else { Resolve-InputPath $GameFolder }
 $backport = Resolve-InputPath $BackportFolder
-$reference = Resolve-InputPath $ReferencePackage
+$reference = if ([string]::IsNullOrWhiteSpace($ReferencePackage)) { $null } else { Resolve-InputPath $ReferencePackage }
 $output = Resolve-InputPath $OutputPackage
 
+# Source the game from either a folder or a package. With only a folder the base
+# package is built here, because a delta must reference one and the console has to
+# install that exact build - base and update ship as a matched pair.
+if (-not $game -and -not $reference) {
+    throw 'Supply -GameFolder or -ReferencePackage (a game folder or a base .pkg).'
+}
 if ($game -and -not (Test-Path -LiteralPath $game -PathType Container)) {
     throw "GameFolder does not exist or is not a directory: $game"
 }
 if (-not (Test-Path -LiteralPath $backport -PathType Container)) {
     throw "BackportFolder does not exist or is not a directory: $backport"
 }
-if (-not (Test-Path -LiteralPath $reference -PathType Leaf)) {
+if ($reference -and -not (Test-Path -LiteralPath $reference -PathType Leaf)) {
     throw "ReferencePackage does not exist: $reference"
 }
 if ([IO.Path]::GetExtension($output) -ine '.pkg') {
     throw 'OutputPackage must be a .pkg path.'
 }
-if ($reference -ieq $output) {
+if ($reference -and $reference -ieq $output) {
     throw 'ReferencePackage and OutputPackage must be different files.'
 }
 if ((Test-Path -LiteralPath $output) -and -not $Force) {
     throw "Output already exists: $output (use -Force to replace it)"
+}
+
+# ------------------------------------------------------------- base package
+if (-not $reference) {
+    $base = if ([string]::IsNullOrWhiteSpace($BasePackage)) {
+        Join-Path (Split-Path -Parent $output) ([IO.Path]::GetFileNameWithoutExtension($output) + '-base.pkg')
+    } else {
+        Resolve-InputPath $BasePackage
+    }
+    if ($base -ieq $output) { throw 'BasePackage and OutputPackage must be different files.' }
+    $fromFolder = Join-Path $toolkit 'build-from-folder.ps1'
+    if (-not (Test-Path -LiteralPath $fromFolder -PathType Leaf)) {
+        throw "No -ReferencePackage given and the toolkit's build-from-folder.ps1 is missing: $fromFolder"
+    }
+    Write-Step "No base package given - building one from the game folder"
+    Write-Note "This writes the full game package and takes a few minutes."
+    Write-Note $base
+    $buildArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fromFolder,
+                   '-SourceFolder', $game, '-OutputPackage', $base,
+                   '-CompressionLevel', [string]$CompressionLevel)
+    if ($Force) { $buildArgs += '-Force' }
+    & (Get-Command powershell.exe).Source @buildArgs 2>&1 | ForEach-Object { Write-Note $_ }
+    if ($LASTEXITCODE -ne 0) { throw "Base package build failed with exit code $LASTEXITCODE" }
+    if (-not (Test-Path -LiteralPath $base -PathType Leaf)) {
+        throw "Base package build reported success but produced nothing at $base"
+    }
+    $reference = $base
+    Write-Note 'Install THIS base package on the console; the update applies only to it.'
 }
 
 # ---------------------------------------------------------------- reference
