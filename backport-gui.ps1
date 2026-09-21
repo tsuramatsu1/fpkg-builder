@@ -112,7 +112,7 @@ function Add-PathRow {
 
 $gameRow = Add-PathRow -Row 0 -LabelText 'Game folder (optional):'
 $backportRow = Add-PathRow -Row 1 -LabelText 'Backport files folder:'
-$referenceRow = Add-PathRow -Row 2 -LabelText 'Base PKG (required):'
+$referenceRow = Add-PathRow -Row 2 -LabelText 'Base PKG:'
 $outputRow = Add-PathRow -Row 3 -LabelText 'Output update (.pkg):'
 
 $txtGame = $gameRow.TextBox
@@ -121,7 +121,7 @@ $txtReference = $referenceRow.TextBox
 $txtOutput = $outputRow.TextBox
 
 $gameHint = New-Object System.Windows.Forms.Label
-$gameHint.Text = 'The base PKG is the one the console installed - the update is built as references into it. A game folder only saves unpacking it.'
+$gameHint.Text = 'Build update: needs the base PKG the console installed. Build base + update: needs only the game folder, and makes both.'
 $gameHint.AutoSize = $true
 $gameHint.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 6)
 $pathGrid.RowCount = 5
@@ -196,6 +196,13 @@ $btnBuild.AutoSize = $true
 $btnBuild.MinimumSize = New-Object System.Drawing.Size(150, 32)
 [void]$actions.Controls.Add($btnBuild)
 
+$btnPair = New-Object System.Windows.Forms.Button
+$btnPair.Text = 'Build base + update'
+$btnPair.AutoSize = $true
+$btnPair.MinimumSize = New-Object System.Drawing.Size(160, 32)
+$btnPair.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
+[void]$actions.Controls.Add($btnPair)
+
 $btnInspect = New-Object System.Windows.Forms.Button
 $btnInspect.Text = 'Inspect base PKG'
 $btnInspect.AutoSize = $true
@@ -240,6 +247,7 @@ function Remove-WorkFolder {
 
 function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
+    $btnPair.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
     $btnCancel.Enabled = $busy
 }
@@ -376,20 +384,32 @@ $timer.Add_Tick({
     }
 })
 
-$btnBuild.Add_Click({
+function Start-Build([bool]$createBase) {
     $game = $txtGame.Text.Trim()
     $backport = $txtBackport.Text.Trim()
     $reference = $txtReference.Text.Trim()
     $output = $txtOutput.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($reference)) {
-        Show-Error ('A base PKG is required - it is the package the console installed, and ' +
-                    'the update is built as references into it. A game folder cannot replace it.')
-        return
-    }
+
     if ([string]::IsNullOrWhiteSpace($backport) -or [string]::IsNullOrWhiteSpace($output)) {
         Show-Error 'Fill in the backport folder and the output path.'
         return
     }
+    if ($createBase) {
+        if ([string]::IsNullOrWhiteSpace($game)) {
+            Show-Error 'Building a base package needs the game folder.'
+            return
+        }
+        if (-not [string]::IsNullOrWhiteSpace($reference)) {
+            Show-Error ('A base PKG is already selected. Use "Build update" to build against it, ' +
+                        'or clear it to create a new one.')
+            return
+        }
+    } elseif ([string]::IsNullOrWhiteSpace($reference)) {
+        Show-Error ('Choose the base PKG the console installed, or use "Build base + update" ' +
+                    'to create one from the game folder.')
+        return
+    }
+
     $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("backport-gui-" + [Guid]::NewGuid().ToString('N'))
     $script:cancelled = $false
     $arguments = @(
@@ -398,15 +418,25 @@ $btnBuild.Add_Click({
         '-WorkFolder', $script:workFolder,
         '-CompressionLevel', [string]$cmbCompression.SelectedItem, '-Force')
     if (-not [string]::IsNullOrWhiteSpace($game)) { $arguments += @('-GameFolder', $game) }
-    if (-not [string]::IsNullOrWhiteSpace($reference)) { $arguments += @('-ReferencePackage', $reference) }
+    if ($createBase) {
+        $arguments += '-CreateBase'
+    } else {
+        $arguments += @('-ReferencePackage', $reference)
+    }
     if (-not [string]::IsNullOrWhiteSpace($txtVersion.Text)) {
         $arguments += @('-ContentVersion', $txtVersion.Text.Trim())
     }
     if ($chkKeepWork.Checked) { $arguments += '-KeepWork' }
 
     $log.Clear()
-    Append-Log "Building update from $backport"
+    if ($createBase) {
+        Append-Log "Building the base package from $game, then the update."
+        Append-Log 'The base is a full game package; expect this to take a while.'
+    } else {
+        Append-Log "Building the update against $reference"
+    }
     Append-Log ''
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = (Get-Command powershell.exe).Source
     $psi.Arguments = (($arguments | ForEach-Object { Quote-Argument $_ }) -join ' ')
@@ -421,9 +451,12 @@ $btnBuild.Add_Click({
     $script:stdoutTask = $script:process.StandardOutput.ReadLineAsync()
     $script:stderrTask = $script:process.StandardError.ReadLineAsync()
     Set-Busy $true
-    $status.Text = 'Building...'
+    $status.Text = if ($createBase) { 'Building base, then update...' } else { 'Building...' }
     $timer.Start()
-})
+}
+
+$btnBuild.Add_Click({ Start-Build $false })
+$btnPair.Add_Click({ Start-Build $true })
 
 $btnCancel.Add_Click({
     if ($null -eq $script:process -or $script:process.HasExited) { return }

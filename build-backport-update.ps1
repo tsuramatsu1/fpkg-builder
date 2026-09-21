@@ -40,6 +40,8 @@ param(
     [Parameter(Mandatory = $true)][string]$BackportFolder,
     [string]$ReferencePackage,
     [Parameter(Mandatory = $true)][string]$OutputPackage,
+    [switch]$CreateBase,
+    [string]$BasePackage,
     [string]$ContentVersion,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
     [string]$WorkFolder,
@@ -167,15 +169,35 @@ $reference = if ([string]::IsNullOrWhiteSpace($ReferencePackage)) { $null } else
 $output = Resolve-InputPath $OutputPackage
 
 # A delta is defined against a package: it stores block references into that exact
-# image and the console validates its digest before merging. So the base package is
-# always required. -GameFolder only supplies the build tree, saving an unpack; it
-# cannot stand in for the reference, and this tool will not build a full game
-# package to manufacture one.
-if (-not $reference) {
+# image and the console validates its digest before merging, so a reference is always
+# required. Either supply one, or ask for a matched pair with -CreateBase: the base is
+# built from the game folder WITHOUT the backport, and the update is built against it.
+# Both then ship together - the update applies only to that exact base build.
+if ($CreateBase) {
+    if ($reference) {
+        throw 'Use either -CreateBase or -ReferencePackage, not both.'
+    }
+    if (-not $game) {
+        throw '-CreateBase builds the base package from the game files, so -GameFolder is required.'
+    }
+} elseif (-not $reference) {
     throw ('-ReferencePackage is required: it is the package the console installed, ' +
            'and the update is built as a set of references into it. A game folder ' +
-           'cannot replace it. If no base package exists, build one with the ' +
-           "toolkit's build-from-folder.ps1 and install THAT on the console first.")
+           'cannot replace it. To build a matched base + update pair from a dump, ' +
+           'pass -CreateBase.')
+}
+
+$base = $null
+if ($CreateBase) {
+    $base = if ([string]::IsNullOrWhiteSpace($BasePackage)) {
+        Join-Path (Split-Path -Parent $output) ([IO.Path]::GetFileNameWithoutExtension($output) + '-base.pkg')
+    } else {
+        Resolve-InputPath $BasePackage
+    }
+    if ($base -ieq $output) { throw 'BasePackage and OutputPackage must be different files.' }
+    if ((Test-Path -LiteralPath $base) -and -not $Force) {
+        throw "Base package already exists: $base (use -Force to replace it)"
+    }
 }
 if ($game -and -not (Test-Path -LiteralPath $game -PathType Container)) {
     throw "GameFolder does not exist or is not a directory: $game"
@@ -194,6 +216,31 @@ if ($reference -and $reference -ieq $output) {
 }
 if ((Test-Path -LiteralPath $output) -and -not $Force) {
     throw "Output already exists: $output (use -Force to replace it)"
+}
+
+# ------------------------------------------------------------- base package
+if ($CreateBase) {
+    $fromFolder = Join-Path $toolkit 'build-from-folder.ps1'
+    if (-not (Test-Path -LiteralPath $fromFolder -PathType Leaf)) {
+        throw "-CreateBase needs the toolkit's build-from-folder.ps1: $fromFolder"
+    }
+    Write-Step "Building the base package from the game folder (no backport)"
+    Write-Note "source : $game"
+    Write-Note "output : $base"
+    Write-Note 'This is a full game package and takes a while.'
+    # Built from the untouched source folder. The backport is overlaid later, into a
+    # work tree, so the base deliberately contains the unmodified game.
+    $buildArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fromFolder,
+                   '-SourceFolder', $game, '-OutputPackage', $base,
+                   '-CompressionLevel', [string]$CompressionLevel)
+    if ($Force) { $buildArgs += '-Force' }
+    & (Get-Command powershell.exe).Source @buildArgs 2>&1 | ForEach-Object { Write-Note $_ }
+    if ($LASTEXITCODE -ne 0) { throw "Base package build failed with exit code $LASTEXITCODE" }
+    if (-not (Test-Path -LiteralPath $base -PathType Leaf)) {
+        throw "The base build reported success but produced nothing at $base"
+    }
+    $reference = $base
+    Write-Note ("base package: {0:N0} bytes" -f (Get-Item -LiteralPath $base).Length)
 }
 
 # ---------------------------------------------------------------- reference
@@ -416,7 +463,15 @@ try {
     }
 
     Write-Host ''
-    Write-Host "Created update package: $output"
+    if ($CreateBase) {
+        Write-Host "Created base package:   $base"
+        Write-Host "Created update package: $output"
+        Write-Host ''
+        Write-Host 'Install the base package on the console, then the update over it.'
+        Write-Host 'They are a matched pair: the update applies only to this base build.'
+    } else {
+        Write-Host "Created update package: $output"
+    }
     $exitCode = 0
 }
 finally {

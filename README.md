@@ -14,8 +14,9 @@ firmware 12.00.
   `scripts/create-gp5-from-folder.py` and `toolchain/prospero-pub-cmd.exe`. Not
   part of this repo. Found automatically in `Documents\PS5JB\fpkg converter`, or
   set `PS5_FPKG_TOOLKIT` / pass `-ToolkitRoot`.
-* **The base package the console installed** — see the rule below.
 * The backport files.
+* **The base package the console installed** — or a game dump, and the tool builds
+  the base for you. See the rule below.
 
 ## Run it
 
@@ -23,21 +24,37 @@ firmware 12.00.
 backport-gui.bat
 ```
 
-or:
+Two flows, depending on whether you already have the base package:
 
 ```powershell
+# you have the base package
 .\build-backport-update.ps1 `
     -BackportFolder   ".\my backport files" `
     -ReferencePackage ".\game.pkg" `
     -OutputPackage    ".\game-backport.pkg"
+
+# you have only a game dump: builds the base, then the update
+.\build-backport-update.ps1 `
+    -GameFolder       ".\PPSA12345-app" `
+    -BackportFolder   ".\my backport files" `
+    -CreateBase `
+    -OutputPackage    ".\game-backport.pkg"
 ```
+
+In the GUI these are the **Build update** and **Build base + update** buttons.
+`-CreateBase` builds the base from the **unmodified** game folder — the backport is
+overlaid afterwards, into a work tree — so the base is the plain game and the update
+carries the backport. It is opt-in: with a base package in hand, nothing large is
+built.
 
 | Parameter | |
 | --- | --- |
 | `-BackportFolder` | The backport files, laid out as they sit in the game root. |
-| `-ReferencePackage` | **Required.** The exact `.pkg` the console installed. |
+| `-ReferencePackage` | The exact `.pkg` the console installed. Required unless `-CreateBase`. |
 | `-OutputPackage` | Where to write the update. |
-| `-GameFolder` | Optional. Saves unpacking the reference. |
+| `-GameFolder` | The game dump. Required with `-CreateBase`; otherwise optional, and saves unpacking the reference. |
+| `-CreateBase` | Build the base package from the game folder first. |
+| `-BasePackage` | Where to write it (default: `<output>-base.pkg`). |
 | `-ContentVersion` | Optional. Defaults to the base version, bumped. |
 | `-CompressionLevel` | `-4`..`9`, default `7`. |
 | `-WorkFolder` | Optional scratch location. |
