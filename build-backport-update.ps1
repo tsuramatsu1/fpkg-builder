@@ -299,10 +299,28 @@ try {
     }
 
     Write-Step "Overlaying backport files"
+    # Backport files always sit at the game root, so the folder handed in must be the
+    # one whose children are eboot.bin / sce_module / fakelib. Releases are often
+    # wrapped in an outer folder; overlaying that would bury everything one level
+    # deep inside the game root, and every file would silently land in the wrong place.
+    $backportRoot = $backport
+    while ($true) {
+        $entries = @(Get-ChildItem -LiteralPath $backportRoot -Force)
+        $files = @($entries | Where-Object { -not $_.PSIsContainer })
+        $dirs = @($entries | Where-Object { $_.PSIsContainer })
+        if ($files.Count -eq 0 -and $dirs.Count -eq 1) {
+            $backportRoot = $dirs[0].FullName
+            Write-Note "Descended into wrapper folder: $($dirs[0].Name)"
+            continue
+        }
+        break
+    }
+
     $skippedAbout = @()
     $applied = @()
-    Get-ChildItem -LiteralPath $backport -Recurse -File | ForEach-Object {
-        $relative = $_.FullName.Substring($backport.Length).TrimStart('\', '/')
+    $newPaths = @()
+    Get-ChildItem -LiteralPath $backportRoot -Recurse -File | ForEach-Object {
+        $relative = $_.FullName.Substring($backportRoot.Length).TrimStart('\', '/')
         # .esbak files are the applier tool's own backups of what it replaced.
         if ($_.Extension -ieq '.esbak') { return }
         # The publisher rejects a GP5 containing sce_sys/about: reserved node.
@@ -311,11 +329,23 @@ try {
             return
         }
         $target = Join-Path $overlay $relative
+        $replaces = Test-Path -LiteralPath $target -PathType Leaf
         Set-BuildTreeFile -Path $target -FromFile $_.FullName
         $applied += $relative
+        if (-not $replaces) { $newPaths += $relative }
+        Write-Note (("+ {0}" -f $relative) + $(if ($replaces) { "" } else { "   (new)" }))
     }
-    foreach ($item in $applied) { Write-Note "+ $item" }
-    if ($applied.Count -eq 0) { throw "No backport files found under $backport" }
+    if ($applied.Count -eq 0) { throw "No backport files found under $backportRoot" }
+    Write-Note ("{0} file(s): {1} replacing game files, {2} new" -f
+                $applied.Count, ($applied.Count - $newPaths.Count), $newPaths.Count)
+    # A backport replaces game binaries. If nothing matched, the tree is almost
+    # certainly rooted at the wrong level and the files would land where nothing
+    # loads them.
+    if ($newPaths.Count -eq $applied.Count) {
+        Write-Warn ("None of the backport files replace anything in the game. The backport " +
+                    "folder is probably rooted at the wrong level - its contents must sit at " +
+                    "the game root (eboot.bin, sce_module/, fakelib/ ...).")
+    }
     foreach ($item in $skippedAbout) {
         Write-Warn "Not shipped (sce_sys/about is a reserved node the SDK regenerates): $item"
     }
