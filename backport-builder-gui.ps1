@@ -111,18 +111,18 @@ function Add-PathRow {
     return [PSCustomObject]@{ TextBox = $text; BrowseButton = $browse }
 }
 
-$gameRow = Add-PathRow -Row 0 -LabelText 'Game folder (optional):'
-$backportRow = Add-PathRow -Row 1 -LabelText 'Backport files folder:'
-$referenceRow = Add-PathRow -Row 2 -LabelText 'Base PKG:'
-$outputRow = Add-PathRow -Row 3 -LabelText 'Output update (.pkg):'
+$gameRow = Add-PathRow -Row 0 -LabelText 'Game folder (dump):'
+$backportRow = Add-PathRow -Row 1 -LabelText 'Backport files (optional):'
+$referenceRow = Add-PathRow -Row 2 -LabelText 'Base PKG (output):'
+$outputRow = Add-PathRow -Row 3 -LabelText 'Update PKG (output):'
 
 $txtGame = $gameRow.TextBox
 $txtBackport = $backportRow.TextBox
-$txtReference = $referenceRow.TextBox
+$txtBase = $referenceRow.TextBox
 $txtOutput = $outputRow.TextBox
 
 $gameHint = New-Object System.Windows.Forms.Label
-$gameHint.Text = 'Build update: needs the base PKG the console installed. Build base + update: needs only the game folder, and makes both.'
+$gameHint.Text = 'The base PKG is built from the game folder if it is not there yet, and reused if it is. Leave the backport blank to build only the base.'
 $gameHint.AutoSize = $true
 $gameHint.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 6)
 $pathGrid.RowCount = 5
@@ -192,17 +192,10 @@ $actions.FlowDirection = 'LeftToRight'
 [void]$root.Controls.Add($actions, 0, 3)
 
 $btnBuild = New-Object System.Windows.Forms.Button
-$btnBuild.Text = 'Build update'
+$btnBuild.Text = 'Build'
 $btnBuild.AutoSize = $true
 $btnBuild.MinimumSize = New-Object System.Drawing.Size(150, 32)
 [void]$actions.Controls.Add($btnBuild)
-
-$btnPair = New-Object System.Windows.Forms.Button
-$btnPair.Text = 'Build base + update'
-$btnPair.AutoSize = $true
-$btnPair.MinimumSize = New-Object System.Drawing.Size(160, 32)
-$btnPair.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
-[void]$actions.Controls.Add($btnPair)
 
 $btnInspect = New-Object System.Windows.Forms.Button
 $btnInspect.Text = 'Inspect base PKG'
@@ -257,7 +250,6 @@ function Remove-WorkFolder {
 
 function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
-    $btnPair.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
     $btnCancel.Enabled = $busy
 }
@@ -302,7 +294,7 @@ function Read-Json([string]$text) {
 }
 
 function Inspect-Reference {
-    $reference = $txtReference.Text.Trim()
+    $reference = $txtBase.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($reference)) { Show-Error 'Choose the base PKG first.'; return $null }
     if (-not (Test-Path -LiteralPath $reference -PathType Leaf)) {
         Show-Error "Base PKG not found: $reference"; return $null
@@ -335,9 +327,9 @@ $backportRow.BrowseButton.Add_Click({
     if ($folderDialog.ShowDialog($form) -eq 'OK') { $txtBackport.Text = $folderDialog.SelectedPath }
 })
 $referenceRow.BrowseButton.Add_Click({
-    if ($openPkg.ShowDialog($form) -eq 'OK') {
-        $txtReference.Text = $openPkg.FileName
-        [void](Inspect-Reference)
+    if ($savePkg.ShowDialog($form) -eq 'OK') {
+        $txtBase.Text = $savePkg.FileName
+        if (Test-Path -LiteralPath $txtBase.Text -PathType Leaf) { [void](Inspect-Reference) }
     }
 })
 $outputRow.BrowseButton.Add_Click({
@@ -394,29 +386,28 @@ $timer.Add_Tick({
     }
 })
 
-function Start-Build([bool]$createBase) {
+function Start-Build {
     $game = $txtGame.Text.Trim()
     $backport = $txtBackport.Text.Trim()
-    $reference = $txtReference.Text.Trim()
+    $base = $txtBase.Text.Trim()
     $output = $txtOutput.Text.Trim()
 
-    if ([string]::IsNullOrWhiteSpace($backport) -or [string]::IsNullOrWhiteSpace($output)) {
-        Show-Error 'Fill in the backport folder and the output path.'
+    if ([string]::IsNullOrWhiteSpace($base)) {
+        Show-Error 'Set the base PKG path. It is built from the game folder if it does not exist yet, and reused if it does.'
         return
     }
-    if ($createBase) {
-        if ([string]::IsNullOrWhiteSpace($game)) {
-            Show-Error 'Building a base package needs the game folder.'
-            return
-        }
-        if (-not [string]::IsNullOrWhiteSpace($reference)) {
-            Show-Error ('A base PKG is already selected. Use "Build update" to build against it, ' +
-                        'or clear it to create a new one.')
-            return
-        }
-    } elseif ([string]::IsNullOrWhiteSpace($reference)) {
-        Show-Error ('Choose the base PKG the console installed, or use "Build base + update" ' +
-                    'to create one from the game folder.')
+    $baseExists = Test-Path -LiteralPath $base -PathType Leaf
+    if (-not $baseExists -and [string]::IsNullOrWhiteSpace($game)) {
+        Show-Error 'The base PKG does not exist yet, so the game folder is needed to build it.'
+        return
+    }
+    $wantUpdate = -not [string]::IsNullOrWhiteSpace($backport)
+    if ($wantUpdate -and [string]::IsNullOrWhiteSpace($output)) {
+        Show-Error 'Set the update PKG path, or clear the backport folder to build only the base.'
+        return
+    }
+    if (-not $wantUpdate -and $baseExists) {
+        Show-Error 'Nothing to do: the base PKG already exists and no backport folder is set.'
         return
     }
 
@@ -424,27 +415,24 @@ function Start-Build([bool]$createBase) {
     $script:cancelled = $false
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $builderScript,
-        '-BackportFolder', $backport, '-OutputPackage', $output,
+        '-BasePackage', $base,
         '-WorkFolder', $script:workFolder,
         '-CompressionLevel', [string]$cmbCompression.SelectedItem, '-Force')
     if (-not [string]::IsNullOrWhiteSpace($game)) { $arguments += @('-GameFolder', $game) }
-    if ($createBase) {
-        $arguments += '-CreateBase'
-    } else {
-        $arguments += @('-ReferencePackage', $reference)
-    }
+    if ($wantUpdate) { $arguments += @('-BackportFolder', $backport, '-OutputPackage', $output) }
     if (-not [string]::IsNullOrWhiteSpace($txtVersion.Text)) {
         $arguments += @('-ContentVersion', $txtVersion.Text.Trim())
     }
     if ($chkKeepWork.Checked) { $arguments += '-KeepWork' }
 
     $log.Clear()
-    if ($createBase) {
-        Append-Log "Building the base package from $game, then the update."
-        Append-Log 'The base is a full game package; expect this to take a while.'
+    if ($baseExists) {
+        Append-Log "Using the existing base package: $base"
     } else {
-        Append-Log "Building the update against $reference"
+        Append-Log "Building the base package from $game"
+        Append-Log 'It is a full game package, so expect this to take a while.'
     }
+    Append-Log $(if ($wantUpdate) { "Then the backport update from $backport" } else { 'No backport folder set - base package only.' })
     Append-Log ''
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -461,12 +449,11 @@ function Start-Build([bool]$createBase) {
     $script:stdoutTask = $script:process.StandardOutput.ReadLineAsync()
     $script:stderrTask = $script:process.StandardError.ReadLineAsync()
     Set-Busy $true
-    $status.Text = if ($createBase) { 'Building base, then update...' } else { 'Building...' }
+    $status.Text = 'Building...'
     $timer.Start()
 }
 
-$btnBuild.Add_Click({ Start-Build $false })
-$btnPair.Add_Click({ Start-Build $true })
+$btnBuild.Add_Click({ Start-Build })
 
 $btnCancel.Add_Click({
     if ($null -eq $script:process -or $script:process.HasExited) { return }

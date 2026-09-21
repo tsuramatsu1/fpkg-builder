@@ -10,10 +10,11 @@ patch against the exact base package the console installed from.  The result
 carries only the changed files; every unchanged file is referenced from the base
 image.
 
--ReferencePackage is always required: a delta stores block references into that
-exact image and the console validates its digest before merging.  -GameFolder is
-optional and only supplies the build tree, saving an unpack of the reference; it
-cannot stand in for the reference.
+The base package is this tool's own artefact: -BasePackage names where it lives, and
+it is built from -GameFolder when missing and reused when present.  So a backport
+built in a later run references the very package this tool produced, which is the one
+the console has to install.  -BackportFolder is optional - a dump that already has the
+backport merged in needs only the base package.
 
 Three constraints are enforced here because each one costs an install attempt:
 
@@ -28,20 +29,27 @@ Three constraints are enforced here because each one costs an install attempt:
    is dropped with a warning.
 
 .EXAMPLE
+Build only the base package (a dump that already has the backport merged in):
+
+.\build-backport.ps1 -GameFolder .\PPSA12345-app -BasePackage .\game.pkg
+
+.EXAMPLE
+Build the backport update later, against the base package built above:
+
 .\build-backport.ps1 `
-    -BackportFolder '.\syphon backport files' `
-    -ReferencePackage .\siphon-base.pkg `
-    -OutputPackage .\syphon-backport-4xx.pkg
+    -GameFolder .\PPSA12345-app `
+    -BackportFolder '.\my backport files' `
+    -BasePackage .\game.pkg `
+    -OutputPackage .\game-backport.pkg
 #>
 
 [CmdletBinding()]
 param(
     [string]$GameFolder,
-    [Parameter(Mandatory = $true)][string]$BackportFolder,
-    [string]$ReferencePackage,
-    [Parameter(Mandatory = $true)][string]$OutputPackage,
-    [switch]$CreateBase,
-    [string]$BasePackage,
+    [string]$BackportFolder,
+    [Parameter(Mandatory = $true)][string]$BasePackage,
+    [string]$OutputPackage,
+    [switch]$RebuildBase,
     [string]$ContentVersion,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
     [string]$WorkFolder,
@@ -165,64 +173,53 @@ foreach ($required in @($gp5Script, $infoScript, $metricScript, $publisher)) {
 
 $game = if ([string]::IsNullOrWhiteSpace($GameFolder)) { $null } else { Resolve-InputPath $GameFolder }
 $backport = Resolve-InputPath $BackportFolder
-$reference = if ([string]::IsNullOrWhiteSpace($ReferencePackage)) { $null } else { Resolve-InputPath $ReferencePackage }
+$base = Resolve-InputPath $BasePackage
 $output = Resolve-InputPath $OutputPackage
 
-# A delta is defined against a package: it stores block references into that exact
-# image and the console validates its digest before merging, so a reference is always
-# required. Either supply one, or ask for a matched pair with -CreateBase: the base is
-# built from the game folder WITHOUT the backport, and the update is built against it.
-# Both then ship together - the update applies only to that exact base build.
-if ($CreateBase) {
-    if ($reference) {
-        throw 'Use either -CreateBase or -ReferencePackage, not both.'
-    }
-    if (-not $game) {
-        throw '-CreateBase builds the base package from the game files, so -GameFolder is required.'
-    }
-} elseif (-not $reference) {
-    throw ('-ReferencePackage is required: it is the package the console installed, ' +
-           'and the update is built as a set of references into it. A game folder ' +
-           'cannot replace it. To build a matched base + update pair from a dump, ' +
-           'pass -CreateBase.')
-}
+# The base package is this tool's own artefact, not something you go and find. It is
+# built from the game folder when it is missing and reused when it is already there,
+# so building the backport separately references the very package that was built
+# here - which is what the console has to install.
+$buildUpdate = -not [string]::IsNullOrWhiteSpace($BackportFolder)
+$baseExists = (Test-Path -LiteralPath $base -PathType Leaf) -and -not $RebuildBase
+$createBase = -not $baseExists
 
-$base = $null
-if ($CreateBase) {
-    $base = if ([string]::IsNullOrWhiteSpace($BasePackage)) {
-        Join-Path (Split-Path -Parent $output) ([IO.Path]::GetFileNameWithoutExtension($output) + '-base.pkg')
-    } else {
-        Resolve-InputPath $BasePackage
-    }
-    if ($base -ieq $output) { throw 'BasePackage and OutputPackage must be different files.' }
-    if ((Test-Path -LiteralPath $base) -and -not $Force) {
-        throw "Base package already exists: $base (use -Force to replace it)"
-    }
+if ([IO.Path]::GetExtension($base) -ine '.pkg') {
+    throw 'BasePackage must be a .pkg path.'
+}
+if ($createBase -and -not $game) {
+    throw ("The base package does not exist yet, so it has to be built: -GameFolder is " +
+           "required. (Pass an existing $base to reuse it instead.)")
 }
 if ($game -and -not (Test-Path -LiteralPath $game -PathType Container)) {
     throw "GameFolder does not exist or is not a directory: $game"
 }
-if (-not (Test-Path -LiteralPath $backport -PathType Container)) {
+if ($buildUpdate -and -not (Test-Path -LiteralPath $backport -PathType Container)) {
     throw "BackportFolder does not exist or is not a directory: $backport"
 }
-if ($reference -and -not (Test-Path -LiteralPath $reference -PathType Leaf)) {
-    throw "ReferencePackage does not exist: $reference"
-}
-if ([IO.Path]::GetExtension($output) -ine '.pkg') {
-    throw 'OutputPackage must be a .pkg path.'
-}
-if ($reference -and $reference -ieq $output) {
-    throw 'ReferencePackage and OutputPackage must be different files.'
-}
-if ((Test-Path -LiteralPath $output) -and -not $Force) {
-    throw "Output already exists: $output (use -Force to replace it)"
+if ($buildUpdate) {
+    if ([string]::IsNullOrWhiteSpace($OutputPackage)) {
+        throw '-OutputPackage is required when -BackportFolder is given (it is where the update goes).'
+    }
+    if ([IO.Path]::GetExtension($output) -ine '.pkg') {
+        throw 'OutputPackage must be a .pkg path.'
+    }
+    if ($base -ieq $output) {
+        throw 'BasePackage and OutputPackage must be different files.'
+    }
+    if ((Test-Path -LiteralPath $output) -and -not $Force) {
+        throw "Output already exists: $output (use -Force to replace it)"
+    }
+} elseif (-not $createBase) {
+    throw ("Nothing to do: the base package already exists and no -BackportFolder was " +
+           "given. Pass -RebuildBase to rebuild it, or a backport folder to build an update.")
 }
 
 # ------------------------------------------------------------- base package
-if ($CreateBase) {
+if ($createBase) {
     $fromFolder = Join-Path $toolkit 'build-from-folder.ps1'
     if (-not (Test-Path -LiteralPath $fromFolder -PathType Leaf)) {
-        throw "-CreateBase needs the toolkit's build-from-folder.ps1: $fromFolder"
+        throw "Building the base package needs the toolkit's build-from-folder.ps1: $fromFolder"
     }
     Write-Step "Building the base package from the game folder (no backport)"
     Write-Note "source : $game"
@@ -233,25 +230,38 @@ if ($CreateBase) {
     $buildArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fromFolder,
                    '-SourceFolder', $game, '-OutputPackage', $base,
                    '-CompressionLevel', [string]$CompressionLevel)
-    if ($Force) { $buildArgs += '-Force' }
+    if ($Force -or $RebuildBase) { $buildArgs += '-Force' }
     & (Get-Command powershell.exe).Source @buildArgs 2>&1 | ForEach-Object { Write-Note $_ }
     if ($LASTEXITCODE -ne 0) { throw "Base package build failed with exit code $LASTEXITCODE" }
     if (-not (Test-Path -LiteralPath $base -PathType Leaf)) {
         throw "The base build reported success but produced nothing at $base"
     }
-    $reference = $base
     Write-Note ("base package: {0:N0} bytes" -f (Get-Item -LiteralPath $base).Length)
+
+    if (-not $buildUpdate) {
+        Write-Host ''
+        Write-Host "Created base package: $base"
+        Write-Host 'No backport folder was given, so no update was built.'
+        Write-Host 'Run again with a backport folder to build the update against this package.'
+        exit 0
+    }
+} else {
+    Write-Step "Using the existing base package"
+    Write-Note $base
+    Write-Note ("{0:N0} bytes" -f (Get-Item -LiteralPath $base).Length)
 }
+
+$reference = $base
 
 # ---------------------------------------------------------------- reference
 Write-Step "Inspecting reference package"
 $refInfo = Invoke-Json @($infoScript, $reference, '--next-version')
 if ($refInfo.kind -ne 'ps5') {
-    throw ("ReferencePackage is not a PS5 package (kind=$($refInfo.kind), magic bytes " +
+    throw ("The base package is not a PS5 package (kind=$($refInfo.kind), magic bytes " +
            "differ). A delta must reference a full FIH package, not another delta.")
 }
 if (-not $refInfo.param) {
-    throw 'ReferencePackage has no readable param.json; it may be a retail (encrypted) package.'
+    throw 'The base package has no readable param.json; it may be a retail (encrypted) package.'
 }
 $baseVersion = $refInfo.param.contentVersion
 Write-Note "title      : $($refInfo.param.titleName) [$($refInfo.param.titleId)]"
@@ -454,7 +464,7 @@ try {
     }
     if ($check.digestOccurrences -lt 1) {
         throw ('The built package does not reference the base digest. It would fail on ' +
-               'console with CE-107891-6. Check that -ReferencePackage is the installed image.')
+               'console with CE-107891-6. Check that the base package is the installed image.')
     }
 
     if (Test-Path -LiteralPath $finalMetric) {
@@ -463,7 +473,7 @@ try {
     }
 
     Write-Host ''
-    if ($CreateBase) {
+    if ($createBase) {
         Write-Host "Created base package:   $base"
         Write-Host "Created update package: $output"
         Write-Host ''

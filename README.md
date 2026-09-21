@@ -17,9 +17,8 @@ firmware 12.00.
   `scripts/create-gp5-from-folder.py` and `toolchain/prospero-pub-cmd.exe`. Not
   part of this repo. Found automatically in `Documents\PS5JB\fpkg converter`, or
   set `PS5_FPKG_TOOLKIT` / pass `-ToolkitRoot`.
-* The backport files.
-* **The base package the console installed** — or a game dump, and the tool builds
-  the base for you. See the rule below.
+* A game dump.
+* The backport files — optional, if the dump does not already include them.
 
 ## Run it
 
@@ -27,37 +26,37 @@ firmware 12.00.
 backport-builder.bat
 ```
 
-Two flows, depending on whether you already have the base package:
+The base package is this tool's own artefact. `-BasePackage` says where it lives:
+it is **built from the game folder when it is missing, and reused when it is there**.
+You never browse for someone else's base package, because a delta only applies to
+the exact build it was made against.
+
+The backport step is optional — a dump that already has the backport merged in
+needs only the base package.
 
 ```powershell
-# you have the base package
-.\build-backport.ps1 `
-    -BackportFolder   ".\my backport files" `
-    -ReferencePackage ".\game.pkg" `
-    -OutputPackage    ".\game-backport.pkg"
+# 1. base package only
+.\build-backport.ps1 -GameFolder .\PPSA12345-app -BasePackage .\game.pkg
 
-# you have only a game dump: builds the base, then the update
+# 2. later, the backport update against that same base
 .\build-backport.ps1 `
-    -GameFolder       ".\PPSA12345-app" `
-    -BackportFolder   ".\my backport files" `
-    -CreateBase `
-    -OutputPackage    ".\game-backport.pkg"
+    -GameFolder     .\PPSA12345-app `
+    -BackportFolder '.\my backport files' `
+    -BasePackage    .\game.pkg `
+    -OutputPackage  .\game-backport.pkg
 ```
 
-In the GUI these are the **Build update** and **Build base + update** buttons.
-`-CreateBase` builds the base from the **unmodified** game folder — the backport is
-overlaid afterwards, into a work tree — so the base is the plain game and the update
-carries the backport. It is opt-in: with a base package in hand, nothing large is
-built.
+Step 2 reuses `game.pkg` rather than rebuilding it, so the update references the
+package step 1 produced. Both can also be done in one run by giving the backport
+folder the first time.
 
 | Parameter | |
 | --- | --- |
-| `-BackportFolder` | The backport files, laid out as they sit in the game root. |
-| `-ReferencePackage` | The exact `.pkg` the console installed. Required unless `-CreateBase`. |
-| `-OutputPackage` | Where to write the update. |
-| `-GameFolder` | The game dump. Required with `-CreateBase`; otherwise optional, and saves unpacking the reference. |
-| `-CreateBase` | Build the base package from the game folder first. |
-| `-BasePackage` | Where to write it (default: `<output>-base.pkg`). |
+| `-GameFolder` | The game dump. Required when the base package has to be built. |
+| `-BasePackage` | **Required.** Where the base package lives; built if missing, reused if present. |
+| `-BackportFolder` | Optional. Omit it to build only the base package. |
+| `-OutputPackage` | Where to write the update. Required with `-BackportFolder`. |
+| `-RebuildBase` | Rebuild the base package even if it already exists. |
 | `-ContentVersion` | Optional. Defaults to the base version, bumped. |
 | `-CompressionLevel` | `-4`..`9`, default `7`. |
 | `-WorkFolder` | Optional scratch location. |
