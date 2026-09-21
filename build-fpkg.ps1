@@ -35,12 +35,12 @@ Three constraints are enforced here because each one costs an install attempt:
 .EXAMPLE
 Base package only (a dump that already has the backport merged in):
 
-.\build-backport.ps1 -GameFolder .\PPSA12345-app -OutputFolder .\out
+.\build-fpkg.ps1 -GameFolder .\PPSA12345-app -OutputFolder .\out
 
 .EXAMPLE
 The backport update later, against the base built above:
 
-.\build-backport.ps1 `
+.\build-fpkg.ps1 `
     -GameFolder .\PPSA12345-app `
     -BackportFolder '.\my backport files' `
     -OutputFolder .\out

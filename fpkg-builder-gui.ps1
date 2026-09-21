@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-    PS5 Backport Builder - Windows GUI
+    fPKG Builder - Windows GUI
 
     Builds a small update package that installs on top of an already-installed
     base game, carrying only the backport files.
@@ -18,9 +18,9 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 # Everything the GUI launches ships beside it; the publishing toolkit itself is
-# located by build-backport.ps1, which discovers it at run time.
+# located by build-fpkg.ps1, which discovers it at run time.
 $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
-$builderScript = Join-Path $repoRoot 'build-backport.ps1'
+$builderScript = Join-Path $repoRoot 'build-fpkg.ps1'
 $infoScript = Join-Path $repoRoot 'scripts\pkg-info.py'
 
 $script:process = $null
@@ -36,7 +36,7 @@ $script:cancelled = $false
 
 function Show-Error([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show(
-        $form, $message, 'PS5 Backport Builder',
+        $form, $message, 'fPKG Builder',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error)
 }
@@ -52,7 +52,7 @@ function Quote-Argument([string]$value) {
 
 # ------------------------------------------------------------------ layout
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'PS5 Backport Builder'
+$form.Text = 'fPKG Builder'
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(1080, 800)
 $form.MinimumSize = New-Object System.Drawing.Size(880, 620)
@@ -427,7 +427,7 @@ function Start-Build {
         return
     }
 
-    $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("backport-builder-" + [Guid]::NewGuid().ToString('N'))
+    $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("fpkg-builder-" + [Guid]::NewGuid().ToString('N'))
     $script:cancelled = $false
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $builderScript,
@@ -491,7 +491,7 @@ $form.Add_FormClosing({
 })
 
 if ($ValidateOnly) {
-    Write-Host 'backport-builder-gui.ps1 loaded and constructed successfully.'
+    Write-Host 'fpkg-builder-gui.ps1 loaded and constructed successfully.'
     $form.Dispose()
     exit 0
 }

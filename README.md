@@ -1,4 +1,4 @@
-# PS5 Backport Builder
+# fPKG Builder
 
 Turns a game dump and a backport file set into installable PS5 packages:
 
@@ -23,7 +23,7 @@ firmware 12.00.
 ## Run it
 
 ```bat
-backport-builder.bat
+fpkg-builder.bat
 ```
 
 Both packages go to **one output folder**, named from the title:
@@ -40,10 +40,10 @@ base package.
 
 ```powershell
 # 1. base package only
-.\build-backport.ps1 -GameFolder .\PPSA12345-app -OutputFolder .\out
+.\build-fpkg.ps1 -GameFolder .\PPSA12345-app -OutputFolder .\out
 
 # 2. later, the update - into the same folder, against that same base
-.\build-backport.ps1 `
+.\build-fpkg.ps1 `
     -GameFolder     .\PPSA12345-app `
     -BackportFolder '.\my backport files' `
     -OutputFolder   .\out
