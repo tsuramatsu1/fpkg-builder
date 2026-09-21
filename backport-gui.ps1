@@ -1,6 +1,6 @@
 #requires -Version 5.1
 <#
-    Backport Update Builder - Windows GUI
+    PS5 Backport Builder - Windows GUI
 
     Builds a small update package that installs on top of an already-installed
     base game, carrying only the backport files.
@@ -18,9 +18,9 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 # Everything the GUI launches ships beside it; the publishing toolkit itself is
-# located by build-backport-update.ps1, which discovers it at run time.
+# located by build-backport.ps1, which discovers it at run time.
 $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
-$builderScript = Join-Path $repoRoot 'build-backport-update.ps1'
+$builderScript = Join-Path $repoRoot 'build-backport.ps1'
 $infoScript = Join-Path $repoRoot 'scripts\pkg-info.py'
 
 $script:process = $null
@@ -36,7 +36,7 @@ $script:cancelled = $false
 
 function Show-Error([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show(
-        $form, $message, 'Backport Update Builder',
+        $form, $message, 'PS5 Backport Builder',
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error)
 }
@@ -52,7 +52,7 @@ function Quote-Argument([string]$value) {
 
 # ------------------------------------------------------------------ layout
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Backport Update Builder'
+$form.Text = 'PS5 Backport Builder'
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(1080, 800)
 $form.MinimumSize = New-Object System.Drawing.Size(880, 620)

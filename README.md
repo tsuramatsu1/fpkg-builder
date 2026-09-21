@@ -1,7 +1,10 @@
-# PS5 Backport Update Tool
+# PS5 Backport Builder
 
-Builds a small **update package** that installs on top of an already-installed
-game and replaces only the backport files. The game stays where it is.
+Turns a game dump and a backport file set into installable PS5 packages:
+
+* a **base package** of the plain game, when you do not already have one, and
+* a **backport update package** — a small delta that installs on top of it and
+  replaces only the backport files, leaving the rest of the game in place.
 
 Syphon Filter: a 69 MB update against a 2.4 GB game, carrying 7 MB — `eboot.bin`,
 `sce_module/libc.prx` and three `fakelib` libraries. Confirmed installing on
@@ -28,13 +31,13 @@ Two flows, depending on whether you already have the base package:
 
 ```powershell
 # you have the base package
-.\build-backport-update.ps1 `
+.\build-backport.ps1 `
     -BackportFolder   ".\my backport files" `
     -ReferencePackage ".\game.pkg" `
     -OutputPackage    ".\game-backport.pkg"
 
 # you have only a game dump: builds the base, then the update
-.\build-backport-update.ps1 `
+.\build-backport.ps1 `
     -GameFolder       ".\PPSA12345-app" `
     -BackportFolder   ".\my backport files" `
     -CreateBase `

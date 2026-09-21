@@ -28,7 +28,7 @@ Three constraints are enforced here because each one costs an install attempt:
    is dropped with a warning.
 
 .EXAMPLE
-.\build-backport-update.ps1 `
+.\build-backport.ps1 `
     -BackportFolder '.\syphon backport files' `
     -ReferencePackage .\siphon-base.pkg `
     -OutputPackage .\syphon-backport-4xx.pkg
