@@ -410,7 +410,7 @@ function Start-Build([bool]$createBase) {
         return
     }
 
-    $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("backport-gui-" + [Guid]::NewGuid().ToString('N'))
+    $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("backport-builder-" + [Guid]::NewGuid().ToString('N'))
     $script:cancelled = $false
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $builderScript,
@@ -482,7 +482,7 @@ $form.Add_FormClosing({
 })
 
 if ($ValidateOnly) {
-    Write-Host 'backport-gui.ps1 loaded and constructed successfully.'
+    Write-Host 'backport-builder-gui.ps1 loaded and constructed successfully.'
     $form.Dispose()
     exit 0
 }

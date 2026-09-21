@@ -24,7 +24,7 @@ firmware 12.00.
 ## Run it
 
 ```bat
-backport-gui.bat
+backport-builder.bat
 ```
 
 Two flows, depending on whether you already have the base package:
