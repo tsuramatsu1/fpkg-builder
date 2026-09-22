@@ -13,10 +13,12 @@ firmware 12.00.
 ## You need
 
 * Windows, PowerShell 5.1, Python 3.
-* The plaintext publishing toolkit — the folder with
-  `scripts/create-gp5-from-folder.py` and `toolchain/prospero-pub-cmd.exe`. Not
-  part of this repo. Found automatically in `Documents\PS5JB\fpkg converter`, or
-  set `PS5_FPKG_TOOLKIT` / pass `-ToolkitRoot`.
+* The SDK binaries — a folder with `toolchain/prospero-pub-cmd.exe` and
+  `toolchain/libScePubTools.dll` beside it. Not redistributable, so not part of
+  this repo. Found automatically in `Documents\PS5JB\fpkg converter` or in this
+  folder, or set `PS5_FPKG_TOOLKIT` / pass `-ToolkitRoot`. A dump whose
+  `sce_sys/pic*.dds` has no matching PNG also needs `prospero-dds2png.exe` in
+  that same folder.
 * A game dump.
 * The backport files — optional, if the dump does not already include them.
 
@@ -119,6 +121,9 @@ Again later: `python .\scripts\pkg-metric.py .\game-backport.pkg.naps_metric.jso
 
 | | |
 | --- | --- |
+| `build-from-folder.ps1` | Builds one package from a game folder. `build-fpkg.ps1` drives it for the base. |
+| `scripts/create-gp5-from-folder.py` | Generates the GP5 project the publisher builds from. |
+| `scripts/find-toolkit.ps1` | Locates the SDK binaries. Dot-sourced by both build scripts. |
 | `scripts/pkg-info.py` | Container kind, digest and `param.json` of a package. |
 | `scripts/pkg-metric.py` | What a built package actually carries. |
 

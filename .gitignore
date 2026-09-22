@@ -7,11 +7,12 @@
 .gp5-assets/
 *-build-logs/
 
-# The plaintext publishing toolkit is not redistributable and lives outside this
-# repo; point at it with PS5_FPKG_TOOLKIT or -ToolkitRoot.
+# The SDK binaries are not redistributable; the scripts that drive them live here
+# but the binaries are found at run time via PS5_FPKG_TOOLKIT or -ToolkitRoot.
 toolchain/
 prospero-pub-cmd.exe
 libScePubTools.dll
+prospero-dds2png.exe
 
 # Game dumps and backport payloads
 *.sprx

@@ -66,37 +66,14 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = [IO.Path]::GetFullPath($PSScriptRoot)
 
-function Test-ToolkitRoot([string]$candidate) {
-    if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
-    if (-not (Test-Path -LiteralPath $candidate -PathType Container)) { return $false }
-    return (Test-Path -LiteralPath (Join-Path $candidate 'scripts\create-gp5-from-folder.py') -PathType Leaf) -and
-           (Test-Path -LiteralPath (Join-Path $candidate 'toolchain\prospero-pub-cmd.exe') -PathType Leaf)
-}
+. (Join-Path $here 'scripts\find-toolkit.ps1')
 
-function Find-ToolkitRoot([string]$explicit, [string]$scriptRoot) {
-    # The plaintext publishing toolkit ships large SDK binaries and lives outside
-    # this repo, so its location is discovered rather than assumed.
-    $candidates = @()
-    if (-not [string]::IsNullOrWhiteSpace($explicit)) { $candidates += $explicit }
-    if (-not [string]::IsNullOrWhiteSpace($env:PS5_FPKG_TOOLKIT)) { $candidates += $env:PS5_FPKG_TOOLKIT }
-    $candidates += $scriptRoot
-    $candidates += (Join-Path $scriptRoot 'fpkg converter')
-    $documents = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
-    if (-not [string]::IsNullOrWhiteSpace($documents)) {
-        $candidates += (Join-Path $documents 'PS5JB\fpkg converter')
-    }
-    foreach ($candidate in $candidates) {
-        if (Test-ToolkitRoot $candidate) { return [IO.Path]::GetFullPath($candidate) }
-    }
-    throw ("Could not locate the plaintext publishing toolkit (the folder holding " +
-           "scripts\create-gp5-from-folder.py and toolchain\prospero-pub-cmd.exe). " +
-           "Pass -ToolkitRoot or set PS5_FPKG_TOOLKIT. Tried: " + ($candidates -join '; '))
-}
-
+# Only the SDK binaries live outside this repo, so only they are discovered.
 $toolkit = Find-ToolkitRoot $ToolkitRoot $here
-$gp5Script = Join-Path $toolkit 'scripts\create-gp5-from-folder.py'
 $publisher = Join-Path $toolkit 'toolchain\prospero-pub-cmd.exe'
-# These two ship with this repo, so they sit next to this script.
+$ddsConverter = Find-DdsConverter $toolkit
+# Everything else ships with this repo, so it sits next to this script.
+$gp5Script = Join-Path $here 'scripts\create-gp5-from-folder.py'
 $infoScript = Join-Path $here 'scripts\pkg-info.py'
 $metricScript = Join-Path $here 'scripts\pkg-metric.py'
 
@@ -107,6 +84,16 @@ function Resolve-InputPath([string]$path) {
     if ([string]::IsNullOrWhiteSpace($path)) { return $path }
     if ([IO.Path]::IsPathRooted($path)) { return [IO.Path]::GetFullPath($path) }
     return [IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $path))
+}
+
+function New-Folder([string]$path) {
+    <#
+        New-Item has no -LiteralPath, so a folder name holding [ or ] - ordinary in
+        scene release names - is read as a wildcard pattern and the call fails or
+        lands somewhere else. .NET takes the path literally and creates the missing
+        parents itself, which is what -Force was there for.
+    #>
+    [void][IO.Directory]::CreateDirectory((Resolve-InputPath $path))
 }
 
 function New-LinkedTree([string]$source, [string]$destination) {
@@ -120,15 +107,18 @@ function New-LinkedTree([string]$source, [string]$destination) {
     #>
     $sourceRoot = $source.TrimEnd('\', '/')
     $linked = 0
-    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    New-Folder $destination
     Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory | ForEach-Object {
         $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
-        New-Item -ItemType Directory -Force -Path (Join-Path $destination $relative) | Out-Null
+        New-Folder (Join-Path $destination $relative)
     }
     Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | ForEach-Object {
         $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
         $target = Join-Path $destination $relative
-        New-Item -ItemType HardLink -Path $target -Value $_.FullName -ErrorAction Stop | Out-Null
+        # Both sides are wildcard patterns to New-Item, and a dump folder named
+        # "[SITE] - Game" is a character class that matches nothing on disk.
+        New-Item -ItemType HardLink -Path ([WildcardPattern]::Escape($target)) `
+                 -Value ([WildcardPattern]::Escape($_.FullName)) -ErrorAction Stop | Out-Null
         $linked++
     }
     return $linked
@@ -142,7 +132,7 @@ function Set-BuildTreeFile {
     param([string]$Path, [string]$FromFile, [string]$Content)
     $parent = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $parent)) {
-        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        New-Folder $parent
     }
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force }
     if ($PSBoundParameters.ContainsKey('FromFile')) {
@@ -171,7 +161,7 @@ function Invoke-Json {
 
 foreach ($required in @($gp5Script, $infoScript, $metricScript, $publisher)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
-        throw "Toolkit component missing: $required"
+        throw "Build component missing: $required"
     }
 }
 
@@ -228,7 +218,7 @@ if ($buildUpdate) {
 }
 
 if (-not (Test-Path -LiteralPath $outDir -PathType Container)) {
-    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    New-Folder $outDir
 }
 
 Write-Step "Output"
@@ -238,9 +228,9 @@ if ($buildUpdate) { Write-Note "update : $(Split-Path -Leaf $output)" }
 
 # ------------------------------------------------------------- base package
 if ($createBase) {
-    $fromFolder = Join-Path $toolkit 'build-from-folder.ps1'
+    $fromFolder = Join-Path $here 'build-from-folder.ps1'
     if (-not (Test-Path -LiteralPath $fromFolder -PathType Leaf)) {
-        throw "Building the base package needs the toolkit's build-from-folder.ps1: $fromFolder"
+        throw "Building the base package needs build-from-folder.ps1 beside this script: $fromFolder"
     }
     Write-Step "Building the base package from the game folder (no backport)"
     Write-Note "source : $game"
@@ -250,7 +240,8 @@ if ($createBase) {
     # work tree, so the base deliberately contains the unmodified game.
     $buildArgs = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fromFolder,
                    '-SourceFolder', $game, '-OutputPackage', $base,
-                   '-CompressionLevel', [string]$CompressionLevel)
+                   '-CompressionLevel', [string]$CompressionLevel,
+                   '-ToolkitRoot', $toolkit)
     if ($Force -or $RebuildBase) { $buildArgs += '-Force' }
     & (Get-Command powershell.exe).Source @buildArgs 2>&1 | ForEach-Object { Write-Note $_ }
     if ($LASTEXITCODE -ne 0) { throw "Base package build failed with exit code $LASTEXITCODE" }
@@ -316,7 +307,7 @@ if (Test-Path -LiteralPath $work) {
     if (-not $Force) { throw "Work folder already exists: $work (use -Force)" }
     Remove-Item -LiteralPath $work -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $work | Out-Null
+New-Folder $work
 
 $exitCode = 1
 try {
@@ -343,8 +334,13 @@ try {
         if (-not $linked) {
             Write-Step "Copying game folder to work tree"
             Write-Note $overlay
+            # -ArgumentList joins the elements with spaces and quotes nothing, so a
+            # path with a space in it arrives as several arguments. The trailing
+            # separator has to go too: robocopy reads \" as an escaped quote.
             $robo = Start-Process -FilePath 'robocopy.exe' `
-                -ArgumentList @($game, $overlay, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/MT:16') `
+                -ArgumentList @(('"' + $game.TrimEnd('\', '/') + '"'),
+                                ('"' + $overlay.TrimEnd('\', '/') + '"'),
+                                '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/MT:16') `
                 -NoNewWindow -Wait -PassThru
             # robocopy uses a bitmask: < 8 means success, >= 8 is a real failure.
             if ($robo.ExitCode -ge 8) { throw "robocopy failed with exit code $($robo.ExitCode)" }
@@ -354,7 +350,7 @@ try {
         # the GP5 must describe, so unpack it and use that as the build tree.
         Write-Step "Extracting base package to work tree (no game folder supplied)"
         Write-Note $overlay
-        New-Item -ItemType Directory -Force -Path $overlay | Out-Null
+        New-Folder $overlay
         & $publisher img_extract --passcode ('0' * 32) --no_progress_bar $reference $overlay 2>&1 |
             ForEach-Object { Write-Note $_ }
         if ($LASTEXITCODE -ne 0) { throw "img_extract failed with exit code $LASTEXITCODE" }
@@ -446,14 +442,17 @@ try {
 
     Write-Step "Generating GP5"
     $gp5 = Join-Path $work 'project.gp5'
-    & $Python $gp5Script $overlay $gp5 `
-        --passcode ('0' * 32) --absolute-paths --keep-keystone 2>&1 |
-        ForEach-Object { Write-Note $_ }
+    $gp5Args = @($gp5Script, $overlay, $gp5,
+                 '--passcode', ('0' * 32), '--absolute-paths', '--keep-keystone')
+    # The generator looks for the DDS converter beside itself, which is no longer
+    # where it lives, so the toolkit's copy is handed over explicitly.
+    if ($ddsConverter) { $gp5Args += @('--dds-converter', $ddsConverter) }
+    & $Python @gp5Args 2>&1 | ForEach-Object { Write-Note $_ }
     if ($LASTEXITCODE -ne 0) { throw "GP5 creation failed with exit code $LASTEXITCODE" }
 
     Write-Step "Building delta against reference (compression $CompressionLevel)"
     $partial = Join-Path $work 'update.partial.pkg'
-    & $publisher img_create --oformat nwonly --compression_level $CompressionLevel `
+    & $publisher img_create --oformat nwonly --compression_level $CompressionLevel --no_progress_bar `
         --ref_pkg_path $reference $gp5 $partial 2>&1 |
         ForEach-Object { Write-Note $_ }
     if ($LASTEXITCODE -ne 0) { throw "img_create failed with exit code $LASTEXITCODE" }
@@ -463,7 +462,7 @@ try {
 
     $outputDirectory = Split-Path -Parent $output
     if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
-        New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+        New-Folder $outputDirectory
     }
     if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Force }
     Move-Item -LiteralPath $partial -Destination $output

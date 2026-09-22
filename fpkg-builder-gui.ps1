@@ -17,6 +17,34 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# The publisher draws its own progress bar with carriage returns and never a
+# newline, so none of it survives the pipelines between it and this window - the
+# log stands still for the twenty minutes the step runs. How much of the source it
+# has read is the one measure of that step visible from outside the process, and
+# unlike the size of the package it is writing, it does not depend on how well the
+# game happens to compress.
+Add-Type -Namespace FpkgBuilder -Name Io -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+private struct IoCounters {
+    public ulong ReadOperationCount;
+    public ulong WriteOperationCount;
+    public ulong OtherOperationCount;
+    public ulong ReadTransferCount;
+    public ulong WriteTransferCount;
+    public ulong OtherTransferCount;
+}
+
+[DllImport("kernel32.dll", SetLastError = true)]
+[return: MarshalAs(UnmanagedType.Bool)]
+private static extern bool GetProcessIoCounters(IntPtr handle, out IoCounters counters);
+
+public static long BytesRead(IntPtr handle) {
+    IoCounters counters;
+    if (!GetProcessIoCounters(handle, out counters)) { return 0L; }
+    return (long)counters.ReadTransferCount;
+}
+'@
+
 # Everything the GUI launches ships beside it; the publishing toolkit itself is
 # located by build-fpkg.ps1, which discovers it at run time.
 $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -33,6 +61,14 @@ $script:referenceDigest = $null
 $script:lastOutput = $null
 $script:workFolder = $null
 $script:cancelled = $false
+$script:phase = $null
+$script:buildStarted = $null
+$script:sampledAt = [DateTime]::MinValue
+$script:gameBytes = [long]0
+$script:baseStart = 0
+$script:baseSpan = 100
+$script:updateStart = 0
+$script:updateSpan = 100
 
 function Show-Error([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -61,11 +97,12 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $root = New-Object System.Windows.Forms.TableLayoutPanel
 $root.Dock = 'Fill'
 $root.ColumnCount = 1
-$root.RowCount = 5
+$root.RowCount = 6
 $root.Padding = New-Object System.Windows.Forms.Padding(12)
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 26)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$form.Controls.Add($root)
@@ -185,11 +222,21 @@ $log.Font = New-Object System.Drawing.Font('Consolas', 9)
 $log.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 8)
 [void]$root.Controls.Add($log, 0, 2)
 
+$progressBar = New-Object System.Windows.Forms.ProgressBar
+$progressBar.Dock = 'Fill'
+$progressBar.Style = 'Continuous'
+$progressBar.Minimum = 0
+# Tenths of a percent, so the bar still creeps on a step measured in gigabytes.
+$progressBar.Maximum = 1000
+$progressBar.MarqueeAnimationSpeed = 30
+$progressBar.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+[void]$root.Controls.Add($progressBar, 0, 3)
+
 $actions = New-Object System.Windows.Forms.FlowLayoutPanel
 $actions.Dock = 'Fill'
 $actions.AutoSize = $true
 $actions.FlowDirection = 'LeftToRight'
-[void]$root.Controls.Add($actions, 0, 3)
+[void]$root.Controls.Add($actions, 0, 4)
 
 $btnBuild = New-Object System.Windows.Forms.Button
 $btnBuild.Text = 'Build'
@@ -212,6 +259,13 @@ $btnCancel.MinimumSize = New-Object System.Drawing.Size(110, 32)
 $btnCancel.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
 [void]$actions.Controls.Add($btnCancel)
 
+$btnOpenOutput = New-Object System.Windows.Forms.Button
+$btnOpenOutput.Text = 'Open output folder'
+$btnOpenOutput.AutoSize = $true
+$btnOpenOutput.MinimumSize = New-Object System.Drawing.Size(150, 32)
+$btnOpenOutput.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
+[void]$actions.Controls.Add($btnOpenOutput)
+
 $status = New-Object System.Windows.Forms.Label
 $status.Text = 'Ready'
 $status.AutoSize = $true
@@ -225,13 +279,115 @@ $footer.AutoSize = $true
 $footer.Anchor = 'Right'
 $footer.ForeColor = [System.Drawing.SystemColors]::GrayText
 $footer.Margin = New-Object System.Windows.Forms.Padding(0, 8, 2, 0)
-[void]$root.Controls.Add($footer, 0, 4)
+[void]$root.Controls.Add($footer, 0, 5)
 
 # ------------------------------------------------------------------ helpers
 function Append-Log([string]$line) {
     if ($null -eq $line) { return }
     $log.AppendText(($line -replace "`r`n", "`n" -replace "`n", [Environment]::NewLine))
     $log.AppendText([Environment]::NewLine)
+}
+
+function Format-Bytes([double]$bytes) {
+    if ($bytes -ge 1GB) { return '{0:N1} GB' -f ($bytes / 1GB) }
+    if ($bytes -ge 1MB) { return '{0:N0} MB' -f ($bytes / 1MB) }
+    return '{0:N0} KB' -f ($bytes / 1KB)
+}
+
+function Format-Span([TimeSpan]$span) {
+    if ($span.TotalHours -ge 1) { return '{0}h {1:00}m' -f [int]$span.TotalHours, $span.Minutes }
+    return '{0}m {1:00}s' -f [int]$span.TotalMinutes, $span.Seconds
+}
+
+function Measure-FolderBytes([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return [long]0 }
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) { return [long]0 }
+    $sum = (Get-ChildItem -LiteralPath $path -Recurse -File -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $sum) { return [long]0 }
+    return [long]$sum
+}
+
+function Get-FileBytes([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return [long]0 }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [long]0 }
+    return [long](Get-Item -LiteralPath $path).Length
+}
+
+function Get-PublisherBytesRead {
+    <#
+        Bytes read so far by the publisher processes this build started. Returns -1
+        when none is running, which is how the caller tells "between steps" apart
+        from "just started and has read nothing yet".
+    #>
+    if ($null -eq $script:buildStarted) { return [long]-1 }
+    $total = [long]0
+    $running = $false
+    foreach ($proc in @(Get-Process -Name 'prospero-pub-cmd' -ErrorAction SilentlyContinue)) {
+        try {
+            if ($proc.StartTime -lt $script:buildStarted) { continue }
+            $total += [FpkgBuilder.Io]::BytesRead($proc.Handle)
+            $running = $true
+        } catch {
+            continue
+        }
+    }
+    if (-not $running) { return [long]-1 }
+    return $total
+}
+
+function Set-Step {
+    <#
+        Total and Span are given only for the steps whose work can be measured; the
+        rest run the bar as a marquee, which is all their duration is known to.
+    #>
+    param([string]$Label, [long]$Total = 0, [int]$Start = 0, [int]$Span = 0)
+    $script:phase = @{
+        Label = $Label; Total = $Total; Start = $Start; Span = $Span; Since = Get-Date
+    }
+    Update-Progress
+}
+
+function Update-Progress {
+    if ($null -eq $script:phase) { return }
+    $phase = $script:phase
+    $read = if ($phase.Total -gt 0 -and $phase.Span -gt 0) { Get-PublisherBytesRead } else { [long]-1 }
+    $elapsed = (Get-Date) - $phase.Since
+    if ($read -lt 0) {
+        if ($progressBar.Style -ne 'Marquee') { $progressBar.Style = 'Marquee' }
+        $status.Text = '{0} - {1} elapsed' -f $phase.Label, (Format-Span $elapsed)
+        return
+    }
+    if ($progressBar.Style -ne 'Continuous') { $progressBar.Style = 'Continuous' }
+    # Held short of the end of the band: the step finishing is what moves it there,
+    # since the total is an estimate of what the publisher will read, not a promise.
+    $fraction = [Math]::Min(0.99, $read / [double]$phase.Total)
+    $value = [int](($phase.Start + ($fraction * $phase.Span)) * 10)
+    $progressBar.Value = [Math]::Max($progressBar.Minimum, [Math]::Min($progressBar.Maximum, $value))
+    $text = '{0} - read {1} of {2} ({3}%), {4} elapsed' -f $phase.Label,
+        (Format-Bytes $read), (Format-Bytes $phase.Total),
+        [int]($fraction * 100), (Format-Span $elapsed)
+    if ($fraction -ge 0.02 -and $elapsed.TotalSeconds -ge 20) {
+        $left = [TimeSpan]::FromSeconds($elapsed.TotalSeconds * (1 - $fraction) / $fraction)
+        $text += ', about {0} left' -f (Format-Span $left)
+    }
+    $status.Text = $text
+}
+
+function Watch-Step([string]$line) {
+    if ($line -notlike '==> *') { return }
+    if ($line -like '==> Building the base package*') {
+        Set-Step -Label 'Building base package' -Total $script:gameBytes `
+                 -Start $script:baseStart -Span $script:baseSpan
+    } elseif ($line -like '==> Building delta against reference*') {
+        # This step reads the whole build tree and the package it is diffing against.
+        $reference = Get-FileBytes (Get-BasePath)
+        $total = if ($script:gameBytes -gt 0) { $script:gameBytes + $reference } else { $reference * 2 }
+        Set-Step -Label 'Building update package' -Total $total `
+                 -Start $script:updateStart -Span $script:updateSpan
+    } else {
+        Set-Step -Label $line.Substring(4).Trim()
+    }
 }
 
 function Remove-WorkFolder {
@@ -252,6 +408,25 @@ function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
     $btnCancel.Enabled = $busy
+}
+
+function Open-OutputFolder {
+    $dir = $txtOutDir.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($dir)) {
+        Show-Error 'Set the output folder first.'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+        Show-Error "There is no folder at $dir yet. It is created when a build starts."
+        return
+    }
+    try {
+        # The folder goes in as the target rather than an argument, so a path with a
+        # space in it needs no quoting and cannot be split into two.
+        Start-Process -FilePath $dir -ErrorAction Stop | Out-Null
+    } catch {
+        Show-Error "Could not open $dir - $($_.Exception.Message)"
+    }
 }
 
 function Get-PythonPath {
@@ -352,6 +527,7 @@ $referenceRow.BrowseButton.Add_Click({
 $outputRow.BrowseButton.Visible = $false
 
 $btnInspect.Add_Click({ [void](Inspect-Reference) })
+$btnOpenOutput.Add_Click({ Open-OutputFolder })
 
 # ------------------------------------------------------------------ build
 function Pump-Output {
@@ -366,6 +542,7 @@ function Pump-Output {
                 Set-Variable -Name $taskName -Scope Script -Value $null
             } else {
                 Append-Log $line
+                Watch-Step $line
                 $stream = if ($taskName -eq 'stdoutTask') {
                     $script:process.StandardOutput
                 } else {
@@ -382,11 +559,24 @@ $timer.Interval = 120
 $timer.Add_Tick({
     if ($null -eq $script:process) { return }
     Pump-Output
+    $now = Get-Date
+    if (($now - $script:sampledAt).TotalMilliseconds -ge 1000) {
+        $script:sampledAt = $now
+        Update-Progress
+    }
     if ($script:process.HasExited -and $script:stdoutEnded -and $script:stderrEnded) {
         $timer.Stop()
         $code = $script:process.ExitCode
         $script:process = $null
+        $script:phase = $null
         Set-Busy $false
+        # A failed build leaves the bar where it stopped; that is where to look.
+        $progressBar.Style = 'Continuous'
+        if ($script:cancelled) {
+            $progressBar.Value = $progressBar.Minimum
+        } elseif ($code -eq 0) {
+            $progressBar.Value = $progressBar.Maximum
+        }
         if ($script:cancelled -or $code -ne 0) { Remove-WorkFolder }
         if ($script:cancelled) {
             $status.Text = 'Cancelled'
@@ -427,6 +617,21 @@ function Start-Build {
         return
     }
 
+    $status.Text = 'Measuring the input folders...'
+    $form.Refresh()
+    $script:gameBytes = Measure-FolderBytes $game
+    $script:buildStarted = Get-Date
+    $script:sampledAt = [DateTime]::MinValue
+    $script:phase = $null
+    # The two publisher runs are what the build spends its time on, so they get the
+    # bar between them; a run that does only one of the two gets the whole of it.
+    $script:baseStart = 0
+    $script:baseSpan = if ($wantUpdate) { 70 } else { 100 }
+    $script:updateStart = if ($baseExists) { 0 } else { 70 }
+    $script:updateSpan = 100 - $script:updateStart
+    $progressBar.Style = 'Continuous'
+    $progressBar.Value = $progressBar.Minimum
+
     $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("fpkg-builder-" + [Guid]::NewGuid().ToString('N'))
     $script:cancelled = $false
     $arguments = @(
@@ -461,7 +666,7 @@ function Start-Build {
     $script:stdoutTask = $script:process.StandardOutput.ReadLineAsync()
     $script:stderrTask = $script:process.StandardError.ReadLineAsync()
     Set-Busy $true
-    $status.Text = 'Building...'
+    Set-Step -Label 'Starting the build'
     $timer.Start()
 }
 
