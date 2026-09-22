@@ -13,14 +13,27 @@ firmware 12.00.
 ## You need
 
 * Windows, PowerShell 5.1, Python 3.
-* The SDK binaries — a folder with `toolchain/prospero-pub-cmd.exe` and
-  `toolchain/libScePubTools.dll` beside it. Not redistributable, so not part of
-  this repo. Found automatically in `Documents\PS5JB\fpkg converter` or in this
-  folder, or set `PS5_FPKG_TOOLKIT` / pass `-ToolkitRoot`. A dump whose
-  `sce_sys/pic*.dds` has no matching PNG also needs `prospero-dds2png.exe` in
-  that same folder.
 * A game dump.
 * The backport files — optional, if the dump does not already include them.
+
+Everything else runs from this folder. The SDK binaries live in `toolchain/`:
+
+```
+toolchain/prospero-pub-cmd.exe     builds the package
+toolchain/libScePubTools.dll
+toolchain/prospero-dds2png.exe     only for a dump whose sce_sys/pic*.dds has no PNG
+toolchain/ext/                     helpers the publisher loads
+```
+
+Nothing outside this folder is ever searched. A second copy of the toolchain
+elsewhere is almost certainly a different SDK build, and since the console checks
+the package digest, quietly falling back to one would be worse than failing. To
+keep the binaries out of the checkout, point `-ToolkitRoot` or `PS5_FPKG_TOOLKIT`
+at a folder holding `toolchain/` instead.
+
+`toolchain/` is in `.gitignore`: the SDK binaries are not redistributable, so they
+stay in your working copy and are not committed. A fresh clone needs them copied
+in before it will build.
 
 ## Run it
 

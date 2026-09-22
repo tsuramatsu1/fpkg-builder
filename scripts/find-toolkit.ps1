@@ -1,9 +1,13 @@
 <#
-    Locating the publishing toolkit.
+    Locating the publishing toolchain.
 
-    The GP5 generator and the build scripts live in this repo, but the SDK binaries
-    they drive do not: prospero-pub-cmd.exe and libScePubTools.dll are not
-    redistributable, so the folder holding them is found at run time instead.
+    It ships in this repo, under toolchain\. Nothing outside this folder is ever
+    searched: a second copy elsewhere on the machine is almost certainly a
+    different SDK build, and since a package's digest is what the console checks,
+    silently falling back to one would be worse than failing outright.
+
+    -ToolkitRoot or PS5_FPKG_TOOLKIT override it for anyone who would rather keep
+    the binaries out of their checkout.
 
     Dot-source this from a script that needs them:
 
@@ -21,29 +25,26 @@ function Find-ToolkitRoot([string]$explicit, [string]$scriptRoot) {
     $candidates = @()
     if (-not [string]::IsNullOrWhiteSpace($explicit)) { $candidates += $explicit }
     if (-not [string]::IsNullOrWhiteSpace($env:PS5_FPKG_TOOLKIT)) { $candidates += $env:PS5_FPKG_TOOLKIT }
-    # A toolchain folder dropped into the repo itself is the simplest arrangement,
-    # and .gitignore already keeps it from being committed.
     $candidates += $scriptRoot
-    $candidates += (Join-Path $scriptRoot 'fpkg converter')
-    $documents = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
-    if (-not [string]::IsNullOrWhiteSpace($documents)) {
-        $candidates += (Join-Path $documents 'PS5JB\fpkg converter')
-    }
     foreach ($candidate in $candidates) {
         if (Test-ToolkitRoot $candidate) { return [IO.Path]::GetFullPath($candidate) }
     }
-    throw ("Could not locate the publishing toolkit (the folder holding " +
-           "toolchain\prospero-pub-cmd.exe). Pass -ToolkitRoot or set " +
-           "PS5_FPKG_TOOLKIT. Tried: " + ($candidates -join '; '))
+    throw ("No publishing toolchain found. Expected toolchain\prospero-pub-cmd.exe " +
+           "beside this repo's scripts. Tried: " + ($candidates -join '; '))
 }
 
 function Find-DdsConverter([string]$toolkitRoot) {
     <#
         Only wanted when a sce_sys/pic*.dds has no matching PNG. Returning nothing is
         fine: the generator raises its own clear error if it turns out to need one.
+
+        The root is checked as well, because a folder handed over with -ToolkitRoot
+        may still use the older layout that kept the converter beside toolchain\.
     #>
     if ([string]::IsNullOrWhiteSpace($toolkitRoot)) { return $null }
-    $candidate = Join-Path $toolkitRoot 'prospero-dds2png.exe'
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    foreach ($candidate in @((Join-Path $toolkitRoot 'toolchain\prospero-dds2png.exe'),
+                             (Join-Path $toolkitRoot 'prospero-dds2png.exe'))) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
     return $null
 }
