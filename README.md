@@ -6,6 +6,7 @@ Turns a game dump and a backport file set into installable PS5 packages:
 * a **backport update package** — a small delta that installs on top of it and
   replaces only the backport files, leaving the rest of the game in place.
 
+**Credits to Drakmor for the SDK Builder**
 ## You need
 
 * Windows, PowerShell 5.1, Python 3.
