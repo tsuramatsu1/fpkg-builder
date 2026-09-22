@@ -22,3 +22,4 @@ eboot.bin
 
 __pycache__/
 *.pyc
+fpkg-builder.rar
