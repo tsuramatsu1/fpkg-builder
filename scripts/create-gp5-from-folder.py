@@ -8,16 +8,22 @@ the publisher to regenerate unless explicitly retained. Extracted `sce_suppl` an
 `sce_sc` trees are also omitted because Publishing Tools reserves those directories.
 Actual input metadata such as param.json, presentation media,
 trophy/UCP and game payloads remain included; extracted license.info/license.dat files are
-excluded by default.
+excluded by default. A UCP container that is still encrypted is the exception: the
+publisher refuses it outright, so it is dropped and the build carries no trophy set.
 
 The source tree is never modified. A normalized param.json with
-applicationDrmType=standard, repaired SELF headers, and any pic*.png files recovered from
-DDS-only sce_sys media are written below a .gp5-assets directory beside the generated GP5.
-Application projects use 100 PlayGo chunks by default. Game files remain in chunk zero;
-each language declared by playgo-scenario.json gets a small generated, uncompressed payload
-in its own chunk so Publishing Tools records a non-zero language size. Remaining chunks are
-empty placeholders. Source scenarios and localized presentation strings are retained, and
-every scenario contains all 100 chunks and marks all of them as initial/required.
+applicationDrmType=standard, repaired SELF headers, and PNG files recovered from
+sce_sys/*.dds when a suitable PNG is missing are written below a .gp5-assets
+directory beside the generated GP5. SDK presentation PNGs use RGB for icon0,
+pic0, and pic1, and RGBA for pic2; only pic2 preserves the alpha channel.
+For PSAL (`--volume al`), the project instead contains only its normalized metadata
+(param.json and a validated 512x512 RGB icon0.png) and requires an entitlement key.
+Application projects use 100 PlayGo chunks by default, configurable from 1 through 255.
+Game files remain in chunk zero; each language declared by playgo-scenario.json gets a
+small generated, uncompressed payload. Languages share a chunk when the configured count
+is too small to assign each a separate chunk. Remaining chunks are empty placeholders.
+Source scenarios and localized presentation strings are retained, and every scenario
+contains all configured chunks and marks all of them as initial/required.
 
 With --build, the output is a new directory containing the GP5, a verified copy of
 the patched SDK runtime, build logs, the directly generated LibProsperoPkg-compatible
@@ -76,8 +82,13 @@ GENERATED_ASSET_DIRECTORY = ".gp5-assets"
 NORMALIZED_SELF_DIRECTORY = "normalized-self"
 PROSPERO_SELF_MAGIC = b"\x54\x14\xf5\xee"
 LEGACY_SELF_MAGIC = b"\x4f\x15\x3d\x1d"
+# The publisher refuses a UCP whose header magic is not 0xb228c60a. Both byte orders
+# count as valid here: only recognising a good container matters, because anything
+# unrecognised is one this build cannot use either way.
+UCP_MAGICS = (b"\xb2\x28\xc6\x0a", b"\x0a\xc6\x28\xb2")
 MAX_SELF_METADATA_SIZE = 64 * 1024 * 1024
 DEFAULT_PLAYGO_CHUNK_COUNT = 100
+MAX_PLAYGO_CHUNK_COUNT = 255
 PLAYGO_LANGUAGE_PAYLOAD_SIZE = 1024 * 1024
 PLAYGO_LANGUAGES = (
     "ja-JP", "en-US", "fr-FR", "es-ES", "de-DE", "it-IT", "nl-NL", "pt-PT",
@@ -101,6 +112,69 @@ SUPPORTED_PATCH_PROFILES = frozenset({
 })
 CONTENT_ID_PATTERN = re.compile(
     r"^[A-Z]{2}[0-9]{4}-[A-Z]{4}[0-9]{5}_[0-9]{2}-[A-Z0-9]{16}$")
+ENTITLEMENT_KEY_PATTERN = re.compile(r"^[0-9A-Fa-f]{32}$")
+PSAL_PARAM_KEYS = (
+    "conceptId", "contentId", "localizedParameters", "masterVersion", "titleId",
+)
+MIB = 1024 * 1024
+GIB = 1024 * MIB
+STANDARD_PACKAGE_LIMIT = 162_514_599_936
+LARGE_PACKAGE_LV1_LIMIT = 195_878_191_104
+LARGE_PACKAGE_LV2_LIMIT = 260_436_918_272
+ADDCONT_MOUNT_LV2_LIMIT = 97_945_387_008
+LARGE_PACKAGE_LV2_FILE_LIMIT = 500_000  # patched Publishing Tools profiles
+
+
+def choose_package_size(unpacked_bytes: int, file_count: int,
+                        sdk_profile: str, mount_level: int = 0
+                        ) -> tuple[int, int | None, int, int]:
+    """Choose the smallest SDK large-package level from uncompressed GP5 inputs.
+
+    This is a preflight estimate, not an exact prediction of the SDK's PFS layout.
+    Include a bounded safety allowance for metadata, alignment and generated files.
+    """
+    if sdk_profile not in {"sdk279", "sdk313"}:
+        raise ValueError(f"unsupported auto-size SDK profile: {sdk_profile}")
+    if unpacked_bytes < 0 or file_count < 0:
+        raise ValueError("unpacked size and file count must not be negative")
+    if type(mount_level) is not int or mount_level not in {0, 1, 2}:
+        raise ValueError(f"invalid kernel.addcontMountLevel: {mount_level!r}")
+    allowance = max(512 * MIB, (unpacked_bytes + 99) // 100) + file_count * 4096
+    estimated = unpacked_bytes + allowance
+    # Preserve the highest mount level that can accommodate the estimated image.
+    # The SDK's lv2 attribute does not lift the level-1 limit, and lv3 requires 0.
+    selected_mount_level = mount_level
+    if selected_mount_level == 2 and estimated > ADDCONT_MOUNT_LV2_LIMIT:
+        selected_mount_level = 1
+    if selected_mount_level == 1 and estimated > LARGE_PACKAGE_LV1_LIMIT:
+        selected_mount_level = 0
+    if selected_mount_level == 2:
+        return 0, None, estimated, selected_mount_level
+    if estimated <= STANDARD_PACKAGE_LIMIT:
+        return 0, None, estimated, selected_mount_level
+    if estimated <= LARGE_PACKAGE_LV1_LIMIT:
+        return 1, None, estimated, selected_mount_level
+    if estimated <= LARGE_PACKAGE_LV2_LIMIT:
+        if file_count > LARGE_PACKAGE_LV2_FILE_LIMIT:
+            raise ValueError(
+                f"lv2 needs at most {LARGE_PACKAGE_LV2_FILE_LIMIT} files in the "
+                f"patched SDK, but the GP5 has {file_count}")
+        return 2, None, estimated, selected_mount_level
+    if sdk_profile == "sdk279":
+        # The estimate uses unpacked input sizes plus a conservative allowance.
+        # Keep the largest profile available to this SDK and let img_create make
+        # the authoritative decision after compression.
+        if file_count > LARGE_PACKAGE_LV2_FILE_LIMIT:
+            raise ValueError(
+                f"lv2 needs at most {LARGE_PACKAGE_LV2_FILE_LIMIT} files in the "
+                f"patched SDK, but the GP5 has {file_count}")
+        return 2, None, estimated, selected_mount_level
+    app_size_gib = max(256, (estimated + GIB - 1) // GIB)
+    if app_size_gib > 320:
+        # appSizeInGib itself is capped at 320. The unpacked-size estimate may
+        # exceed it while the compressed package still fits.
+        app_size_gib = 320
+    return 4, app_size_gib, estimated, selected_mount_level
 
 
 def relative_posix(root: Path, path: Path) -> str:
@@ -233,6 +307,26 @@ def is_service_artifact(relative: str) -> bool:
     return Path(parts[-1]).suffix.casefold() in RESERVED_SCE_SYS_SUFFIXES
 
 
+def is_unusable_ucp(path: Path) -> bool:
+    """
+    A trophy/UDS container the publisher will reject outright.
+
+    A dump taken without decrypting sce_sys leaves these encrypted, and the keys to
+    recover them are not available here. One of them stops the entire build with
+    "ucp_header.ucp_magic is not 0xb228c60a", so it is dropped instead and the rest
+    of the game still builds - without its trophy set. Pass --keep-sce-sys to force
+    one back in.
+    """
+    if path.suffix.casefold() != ".ucp":
+        return False
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(4)
+    except OSError:
+        return False
+    return not any(header.startswith(magic) for magic in UCP_MAGICS)
+
+
 def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tuple[list[Path], list[str]]:
     included: list[Path] = []
     skipped: list[str] = []
@@ -273,6 +367,10 @@ def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tup
                     normalized.removeprefix("fakelib/") in EXCLUDED_FAKE_LIBRARIES):
                 skipped.append(relative + " (SDK/runtime fakelib module)")
                 continue
+            if is_unusable_ucp(item) and normalized not in keep_service_paths:
+                skipped.append(
+                    relative + " (encrypted UCP container; no trophy set in this build)")
+                continue
             if is_service_artifact(relative) and normalized not in keep_service_paths:
                 skipped.append(relative + " (reserved/SDK-generated sce_sys artifact)")
                 continue
@@ -305,36 +403,141 @@ def default_language(param_path: Path) -> str:
     return language if isinstance(language, str) and language else "en-US"
 
 
-def write_standard_param(source: Path, destination: Path) -> None:
+def addcont_mount_level(value: dict, source: Path) -> int:
+    kernel = value.get("kernel", {})
+    if not isinstance(kernel, dict):
+        raise ValueError(f"{source} kernel must be a JSON object")
+    level = kernel.get("addcontMountLevel", 0)
+    if type(level) is not int or level not in {0, 1, 2}:
+        raise ValueError(
+            f"{source} kernel.addcontMountLevel must be 0, 1 or 2, "
+            f"got {level!r}")
+    return level
+
+
+def read_addcont_mount_level(source: Path) -> int:
     try:
         value = json.loads(source.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot parse {source}: {error}") from error
     if not isinstance(value, dict):
         raise ValueError(f"{source} must contain a JSON object")
-    value["applicationDrmType"] = "standard"
+    return addcont_mount_level(value, source)
+
+
+def normalize_entitlement_key(volume: str, value: str | None) -> str | None:
+    if volume == "al" and value is None:
+        raise ValueError("--entitlement-key is required for --volume al")
+    if value is None:
+        return None
+    if volume not in {"ac", "al"}:
+        raise ValueError("--entitlement-key is valid only for --volume ac or al")
+    if ENTITLEMENT_KEY_PATTERN.fullmatch(value) is None:
+        raise ValueError("entitlement key must contain exactly 32 hexadecimal characters")
+    return value.upper()
+
+
+def write_standard_param(
+    source: Path, destination: Path, volume: str,
+    size_selection: tuple[int, int | None, int, int] | None = None,
+) -> None:
+    try:
+        value = json.loads(source.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot parse {source}: {error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{source} must contain a JSON object")
+    if volume == "al":
+        missing = [key for key in PSAL_PARAM_KEYS if key not in value]
+        if missing:
+            raise ValueError(
+                f"{source} is missing required PSAL field(s): {', '.join(missing)}")
+        value = {key: value[key] for key in PSAL_PARAM_KEYS}
+    else:
+        value["applicationDrmType"] = "standard"
+        if size_selection is not None:
+            if value.get("applicationCategoryType") != 0:
+                raise ValueError(
+                    "automatic large-package selection requires a native game "
+                    "(applicationCategoryType: 0)")
+            attribute, app_size_gib, _, selected_mount_level = size_selection
+            value["attributePub"] = attribute
+            original_mount_level = addcont_mount_level(value, source)
+            kernel = value.get("kernel")
+            if selected_mount_level != original_mount_level:
+                if kernel is None:
+                    kernel = {}
+                    value["kernel"] = kernel
+                kernel["addcontMountLevel"] = selected_mount_level
+            if app_size_gib is not None:
+                if kernel is None:
+                    kernel = {}
+                    value["kernel"] = kernel
+                if selected_mount_level != 0:
+                    raise ValueError(
+                        "lv3 requires kernel.addcontMountLevel to be absent or 0")
+                kernel["appSizeInGib"] = app_size_gib
+            elif kernel is not None:
+                kernel.pop("appSizeInGib", None)
+            if ((selected_mount_level == 1 and attribute not in {0, 1}) or
+                    (selected_mount_level == 2 and attribute != 0)):
+                raise ValueError(
+                    f"attributePub={attribute} is incompatible with "
+                    f"kernel.addcontMountLevel={selected_mount_level}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(
         json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def missing_presentation_pngs(root: Path) -> list[tuple[Path, str]]:
+def validate_psal_icon(path: Path) -> None:
+    data = path.read_bytes()[:33]
+    if (len(data) < 33 or data[:8] != b"\x89PNG\r\n\x1a\n" or
+            data[12:16] != b"IHDR"):
+        raise ValueError(f"PSAL icon is not a valid PNG: {path}")
+    width, height = struct.unpack_from(">II", data, 16)
+    bit_depth, color_type = data[24], data[25]
+    if (width, height, bit_depth, color_type) != (512, 512, 8, 2):
+        raise ValueError(
+            "PSAL sce_sys/icon0.png must be 512x512, 8-bit RGB without alpha "
+            f"(got {width}x{height}, bit depth {bit_depth}, color type {color_type})")
+
+
+def sce_sys_dds_images(root: Path) -> list[tuple[Path, str]]:
     system = root / "sce_sys"
     if not system.is_dir():
         return []
-    files = {
-        item.name.casefold(): item
-        for item in system.iterdir()
-        if item.is_file()
-    }
-    missing: list[tuple[Path, str]] = []
-    for name, dds in sorted(files.items()):
-        if not name.startswith("pic") or not name.endswith(".dds"):
+    images: list[tuple[Path, str]] = []
+    destination_names: set[str] = set()
+    for dds in sorted(system.iterdir(), key=lambda item: item.name.casefold()):
+        if not dds.is_file() or dds.suffix.casefold() != ".dds":
             continue
         png_name = dds.with_suffix(".png").name
-        if png_name.casefold() not in files:
-            missing.append((dds, png_name))
-    return missing
+        if png_name.casefold() in destination_names:
+            raise ValueError(f"multiple sce_sys DDS files map to {png_name}")
+        destination_names.add(png_name.casefold())
+        images.append((dds, png_name))
+    return images
+
+
+def required_png_color_type(name: str) -> int | None:
+    stem = Path(name).stem.casefold()
+    if re.fullmatch(r"(?:icon0|pic0|pic1)(?:_[0-9]{2})?", stem):
+        return 2  # 8-bit RGB
+    if re.fullmatch(r"pic2(?:_[0-9]{2})?", stem):
+        return 6  # 8-bit RGBA
+    return None
+
+
+def png_color_type(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    with path.open("rb") as source:
+        header = source.read(26)
+    if (len(header) < 26 or header[:8] != b"\x89PNG\r\n\x1a\n" or
+            header[8:12] != b"\x00\x00\x00\x0d" or
+            header[12:16] != b"IHDR" or header[24] != 8):
+        return None
+    return header[25]
 
 
 def find_dds_converter(explicit: Path | None) -> Path:
@@ -354,28 +557,31 @@ def find_dds_converter(explicit: Path | None) -> Path:
         if resolved.is_file():
             return resolved
     raise FileNotFoundError(
-        "a sce_sys/pic*.dds file has no matching PNG, but no prospero-dds2png converter "
-        "was found; rebuild the toolkit or use --dds-converter")
+        "sce_sys contains DDS images, but no prospero-dds2png converter was found; "
+        "rebuild the toolkit or use --dds-converter")
 
 
-def recover_presentation_pngs(
-    missing: list[tuple[Path, str]], generated_system: Path,
+def convert_dds_images(
+    images: list[tuple[Path, str]], generated_system: Path,
     converter_path: Path | None,
 ) -> list[tuple[str, Path]]:
-    if not missing:
+    if not images:
         return []
     converter = find_dds_converter(converter_path)
-    recovered: list[tuple[str, Path]] = []
-    for source, png_name in missing:
+    converted: list[tuple[str, Path]] = []
+    for source, png_name in images:
         destination = generated_system / png_name
         if destination.exists() or destination.is_symlink():
             raise FileExistsError(f"generated PNG already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Recovering sce_sys/{png_name} from {source.name}...")
+        required_color = required_png_color_type(png_name)
+        preserve_alpha = required_color is None or required_color == 6
+        mode = "RGBA" if preserve_alpha else "RGB"
+        print(f"Converting sce_sys/{source.name} to {png_name} ({mode})...")
         command = ([sys.executable, str(converter)]
                    if converter.suffix.casefold() == ".py" else [str(converter)])
         command.extend([str(source), str(destination)])
-        if source.stem.casefold() == "pic2":
+        if preserve_alpha:
             command.append("--preserve-alpha")
         completed = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -384,10 +590,11 @@ def recover_presentation_pngs(
             raise RuntimeError(
                 f"DDS converter failed for {source} with exit code "
                 f"{completed.returncode}:\n{completed.stdout.rstrip()}")
-        if not destination.is_file() or not destination.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
-            raise ValueError(f"DDS converter did not create a valid PNG: {destination}")
-        recovered.append((f"sce_sys/{png_name}", destination))
-    return recovered
+        if png_color_type(destination) != (6 if preserve_alpha else 2):
+            raise ValueError(
+                f"DDS converter did not create an 8-bit {mode} PNG: {destination}")
+        converted.append((f"sce_sys/{png_name}", destination))
+    return converted
 
 
 def default_scenario(language: str) -> dict[str, object]:
@@ -492,11 +699,6 @@ def write_scenario(
     if chunk_default_language.casefold() not in {item.casefold() for item in chunk_languages}:
         raise ValueError(
             f"{source} chunkDefaultLanguage is not present in chunkSupportedLanguages")
-    if len(chunk_languages) >= DEFAULT_PLAYGO_CHUNK_COUNT:
-        raise ValueError(
-            f"{source} declares too many chunk languages for "
-            f"{DEFAULT_PLAYGO_CHUNK_COUNT} PlayGo chunks")
-
     path.write_text(
         json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return (count, default_id, sorted(definitions),
@@ -504,7 +706,7 @@ def write_scenario(
 
 
 def write_language_payloads(
-    generated_root: Path, languages: list[str],
+    generated_root: Path, languages: list[str], chunk_count: int,
 ) -> list[tuple[str, Path, int]]:
     """Create harmless per-language chunk members outside reserved sce_sys paths."""
     result: list[tuple[str, Path, int]] = []
@@ -517,7 +719,7 @@ def write_language_payloads(
         payload.parent.mkdir(parents=True, exist_ok=True)
         payload.write_bytes(bytes(PLAYGO_LANGUAGE_PAYLOAD_SIZE))
         destination = f"playgo-languages/{index:02d}-{safe_language}.bin"
-        result.append((destination, payload, index))
+        result.append((destination, payload, min(index, chunk_count - 1)))
     return result
 
 
@@ -547,6 +749,9 @@ def indent(element: ET.Element, level: int = 0) -> None:
 def build_gp5(
     root: Path, output: Path, volume: str, passcode: str,
     absolute_paths: bool, keep_service_paths: set[str], converter_path: Path | None,
+    entitlement_key: str | None = None,
+    auto_size_profile: str | None = None,
+    chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
 ) -> tuple[int, list[str]]:
     if len(passcode) != 32:
         raise ValueError("passcode must contain exactly 32 characters")
@@ -554,8 +759,16 @@ def build_gp5(
         raise NotADirectoryError(root)
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"output already exists: {output}")
+    entitlement_key = normalize_entitlement_key(volume, entitlement_key)
+    if auto_size_profile is not None and volume != "app":
+        raise ValueError("automatic package-size selection supports APP volumes only")
+    if type(chunk_count) is not int or not 1 <= chunk_count <= MAX_PLAYGO_CHUNK_COUNT:
+        raise ValueError(f"PlayGo chunk count must be 1..{MAX_PLAYGO_CHUNK_COUNT}")
+    if volume != "app" and chunk_count != DEFAULT_PLAYGO_CHUNK_COUNT:
+        raise ValueError("custom PlayGo chunk count supports APP volumes only")
+    is_psal = volume == "al"
     scenario_input = output.with_suffix(".playgo-scenario.json")
-    if scenario_input.exists() or scenario_input.is_symlink():
+    if not is_psal and (scenario_input.exists() or scenario_input.is_symlink()):
         raise FileExistsError(f"generated PlayGo scenario already exists: {scenario_input}")
     output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -565,41 +778,132 @@ def build_gp5(
         reason = "excluded as a service artifact" if param.exists() else "missing"
         raise ValueError(f"required sce_sys/param.json is {reason}")
     package_content_id = content_id(param)
-    (scenario_count, scenario_default_id, scenario_definitions,
-     chunk_default_language, chunk_languages) = write_scenario(
-        scenario_input, root / "sce_sys" / "playgo-scenario.json", default_language(param))
+    # PSAL permits only its original RGB icon0.png. Other volume types use a
+    # DDS only when its PNG counterpart is absent or has the wrong color mode.
+    dds_images = [] if is_psal else sce_sys_dds_images(root)
+    source_pngs = {relative_posix(root, file).casefold(): file for file in files}
+    needed_conversions: list[tuple[Path, str]] = []
+    replaced_pngs: set[Path] = set()
+    for dds, png_name in dds_images:
+        original = source_pngs.get(f"sce_sys/{png_name}".casefold())
+        required_color = required_png_color_type(png_name)
+        if original is not None and (required_color is None or
+                                     png_color_type(original) == required_color):
+            continue
+        if original is not None:
+            replaced_pngs.add(original)
+            skipped.append(relative_posix(root, original) +
+                           " (invalid PNG color mode; replaced from DDS)")
+        needed_conversions.append((dds, png_name))
+    if replaced_pngs:
+        files = [file for file in files if file not in replaced_pngs]
+    for file in files:
+        relative = relative_posix(root, file)
+        if (relative.casefold().startswith("sce_sys/") and
+                relative.count("/") == 1 and file.suffix.casefold() == ".png"):
+            required_color = required_png_color_type(file.name)
+            if required_color is not None and png_color_type(file) != required_color:
+                mode = "RGB" if required_color == 2 else "RGBA"
+                raise ValueError(f"{relative} must be an 8-bit {mode} PNG; "
+                                 "no matching DDS is available to repair it")
+    if is_psal:
+        allowed = {"sce_sys/param.json", "sce_sys/icon0.png"}
+        selected: list[Path] = []
+        for file in files:
+            relative = relative_posix(root, file)
+            if relative.casefold() in allowed:
+                selected.append(file)
+            else:
+                skipped.append(relative + " (PSAL contains metadata only)")
+        files = selected
+        icon = next(
+            (file for file in files
+             if relative_posix(root, file).casefold() == "sce_sys/icon0.png"), None)
+        if icon is None:
+            raise ValueError("--volume al requires sce_sys/icon0.png")
+        validate_psal_icon(icon)
+        scenario_count = scenario_default_id = 0
+        scenario_definitions = []
+        chunk_default_language = ""
+        chunk_languages = []
+    else:
+        (scenario_count, scenario_default_id, scenario_definitions,
+         chunk_default_language, chunk_languages) = write_scenario(
+            scenario_input, root / "sce_sys" / "playgo-scenario.json",
+            default_language(param))
     generated_root = output.parent / GENERATED_ASSET_DIRECTORY / output.stem
     generated_system = generated_root / "sce_sys"
     generated_param = generated_system / "param.json"
     if generated_param.exists() or generated_param.is_symlink():
         raise FileExistsError(f"generated param.json already exists: {generated_param}")
-    write_standard_param(param, generated_param)
-    recovered_pngs = recover_presentation_pngs(
-        missing_presentation_pngs(root), generated_system, converter_path)
-    executable_replacements = prepare_executable_inputs(root, files, generated_root)
-    language_payloads = (write_language_payloads(generated_root, chunk_languages)
+    converted_pngs = convert_dds_images(
+        needed_conversions, generated_system, converter_path)
+    executable_replacements = ({} if is_psal else
+                               prepare_executable_inputs(root, files, generated_root))
+    language_payloads = (write_language_payloads(generated_root, chunk_languages, chunk_count)
                          if volume == "app" else [])
+    size_selection = None
+    if auto_size_profile is not None:
+        mapped_files = [executable_replacements.get(file, file) for file in files
+                        if file != param]
+        mapped_files.extend(path for _, path in converted_pngs)
+        mapped_files.extend(path for _, path, _ in language_payloads)
+        mapped_files.append(scenario_input)
+        # The normalized param is metadata, not game payload. Its small size is
+        # covered by the allowance; all other mapped files use their actual size.
+        unpacked_bytes = sum(path.stat().st_size for path in mapped_files)
+        file_count = len(mapped_files) + 1
+        mount_level = read_addcont_mount_level(param)
+        size_selection = choose_package_size(
+            unpacked_bytes, file_count, auto_size_profile, mount_level)
+        attribute, app_size_gib, estimated, selected_mount_level = size_selection
+        detail = (f", appSizeInGib={app_size_gib}" if app_size_gib else "")
+        if selected_mount_level != mount_level:
+            print(f"[Warn] Adjusting kernel.addcontMountLevel from {mount_level} "
+                  f"to {selected_mount_level} in the generated param.json; "
+                  "the source file is unchanged.")
+        profile_limit = (LARGE_PACKAGE_LV2_LIMIT if auto_size_profile == "sdk279"
+                         else 320 * GIB)
+        if estimated > profile_limit:
+            maximum = ("attributePub=2 (lv2)" if auto_size_profile == "sdk279"
+                       else "attributePub=4 (lv3), appSizeInGib=320")
+            print(f"[Warn] Conservative estimate {estimated} bytes exceeds the "
+                  f"maximum declared size for {auto_size_profile}: "
+                  f"{profile_limit} bytes. Continuing with {maximum}; "
+                  "img_create will apply the final limit after compression.")
+        print(f"Unpacked GP5 inputs: {unpacked_bytes} bytes, {file_count} files; "
+              f"conservative estimate: {estimated} bytes; "
+              f"addcontMountLevel={selected_mount_level}; "
+              f"attributePub={attribute}{detail}")
+    write_standard_param(param, generated_param, volume, size_selection)
 
     project = ET.Element("psproject", {"fmt": "gp5"})
     volume_node = ET.SubElement(project, "volume")
     ET.SubElement(volume_node, "volume_type").text = VOLUME_TYPES[volume]
     package = ET.SubElement(volume_node, "package", {"passcode": passcode})
-    package.set("content_id", package_content_id)
+    if is_psal:
+        package.set("entitlement_key", entitlement_key)
+    else:
+        package.set("content_id", package_content_id)
+        if entitlement_key is not None:
+            package.set("entitlement_key", entitlement_key)
     if volume == "app":
         chunk_info = ET.SubElement(volume_node, "chunk_info", {
-            "chunk_count": str(DEFAULT_PLAYGO_CHUNK_COUNT),
+            "chunk_count": str(chunk_count),
             "scenario_count": str(scenario_count)})
         chunks = ET.SubElement(chunk_info, "chunks", {
             "supported_languages": " ".join(chunk_languages),
             "default_language": chunk_default_language,
         })
-        for chunk_id in range(DEFAULT_PLAYGO_CHUNK_COUNT):
+        for chunk_id in range(chunk_count):
+            assigned_languages = [language for index, language in
+                                  enumerate(chunk_languages, start=1)
+                                  if min(index, chunk_count - 1) == chunk_id]
             attributes = {
                 "id": str(chunk_id),
                 "label": f"Chunk #{chunk_id}",
                 "layer_no": "0",
-                "languages": (chunk_languages[chunk_id - 1]
-                              if 1 <= chunk_id <= len(chunk_languages)
+                "languages": (" ".join(assigned_languages) if assigned_languages
                               else " ".join(chunk_languages)),
             }
             ET.SubElement(chunks, "chunk", attributes)
@@ -609,21 +913,22 @@ def build_gp5(
             scenario = ET.SubElement(scenarios, "scenario", {
                 "id": str(scenario_id),
                 "type": scenario_type,
-                "initial_chunk_count": str(DEFAULT_PLAYGO_CHUNK_COUNT),
+                "initial_chunk_count": str(chunk_count),
                 "label": label,
             })
-            scenario.text = f"0-{DEFAULT_PLAYGO_CHUNK_COUNT - 1}"
+            scenario.text = f"0-{chunk_count - 1}" if chunk_count > 1 else "0"
 
     files_node = ET.SubElement(project, "files")
-    ET.SubElement(files_node, "file", {
-        "dst_path": "sce_sys/playgo-scenario.json",
-        "src_path": source_path(output.parent, scenario_input, absolute_paths),
-        "chunk": "0",
-    })
-    for destination, recovered in recovered_pngs:
+    if not is_psal:
+        ET.SubElement(files_node, "file", {
+            "dst_path": "sce_sys/playgo-scenario.json",
+            "src_path": source_path(output.parent, scenario_input, absolute_paths),
+            "chunk": "0",
+        })
+    for destination, converted in converted_pngs:
         ET.SubElement(files_node, "file", {
             "dst_path": destination,
-            "src_path": source_path(output.parent, recovered, absolute_paths),
+            "src_path": source_path(output.parent, converted, absolute_paths),
             "chunk": "0",
         })
     for destination, payload, chunk_id in language_payloads:
@@ -636,14 +941,17 @@ def build_gp5(
     for file in files:
         actual_source = (generated_param if file == param else
                          executable_replacements.get(file, file))
-        ET.SubElement(files_node, "file", {
+        attributes = {
             "dst_path": relative_posix(root, file),
             "src_path": source_path(output.parent, actual_source, absolute_paths),
-            "chunk": "0",
-        })
+        }
+        if not is_psal:
+            attributes["chunk"] = "0"
+        ET.SubElement(files_node, "file", attributes)
     indent(project)
     ET.ElementTree(project).write(output, encoding="utf-8", xml_declaration=True)
-    return len(files) + len(recovered_pngs) + len(language_payloads) + 1, skipped
+    return (len(files) + len(converted_pngs) + len(language_payloads) +
+            (0 if is_psal else 1)), skipped
 
 
 def copy_toolchain(
@@ -750,6 +1058,7 @@ def build_bundle(
     root: Path, destination: Path, volume: str, passcode: str,
     keep_service_paths: set[str], publishing_tools: Path,
     converter_path: Path | None,
+    chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
 ) -> tuple[Path, int, list[str]]:
     if volume != "app":
         raise ValueError("--build currently supports only the verified debug APP/nwonly profile")
@@ -759,13 +1068,20 @@ def build_bundle(
             "sce_sys/keystone")
     if destination.exists() or destination.is_symlink():
         raise FileExistsError(f"build destination already exists: {destination}")
+    manifest_path = publishing_tools / "patch-manifest.json"
+    toolchain_profile = json.loads(manifest_path.read_text(encoding="utf-8")).get("profile")
+    if toolchain_profile not in SUPPORTED_PATCH_PROFILES:
+        raise ValueError(f"unsupported patched SDK profile in {manifest_path}")
+    auto_size_profile = toolchain_profile[:6]
     destination.mkdir(parents=True)
     project_path = destination / "project.gp5"
     # Bundle GP5 paths are relative to the bundle. They still resolve to the caller-owned source
     # tree, which avoids silently duplicating a potentially multi-gigabyte game directory.
     count, skipped = build_gp5(
         root, project_path, volume, passcode, absolute_paths=False,
-        keep_service_paths=keep_service_paths, converter_path=converter_path)
+        keep_service_paths=keep_service_paths, converter_path=converter_path,
+        entitlement_key=None, auto_size_profile=auto_size_profile,
+        chunk_count=chunk_count)
 
     toolchain = destination / "toolchain"
     toolchain_profile, runtime = copy_toolchain(publishing_tools, toolchain)
@@ -800,6 +1116,7 @@ def build_bundle(
         "project": "project.gp5",
         "passcode": passcode,
         "volume": volume,
+        "chunk_count": chunk_count,
         "file_count": count,
         "excluded": skipped,
         "toolchain_source": str(publishing_tools),
@@ -834,8 +1151,16 @@ def main() -> None:
                         help="patched Publishing Tools bin directory used by --build")
     parser.add_argument("--volume", choices=VOLUME_TYPES, default="app",
                         help="package type (default: app)")
+    parser.add_argument("--auto-size-profile", choices=("sdk279", "sdk313"),
+                        help="select attributePub from unpacked inputs for this SDK")
+    parser.add_argument("--chunk-count", type=int, default=DEFAULT_PLAYGO_CHUNK_COUNT,
+                        metavar="1..255",
+                        help="PlayGo chunk count for APP projects (default: 100)")
     parser.add_argument("--passcode", default="0" * 32,
                         help="32-character package passcode (default: 32 zeroes)")
+    parser.add_argument(
+        "--entitlement-key",
+        help="16-byte hex entitlement key (required for al; optional for ac)")
     parser.add_argument("--absolute-paths", action="store_true",
                         help="write absolute src_path values instead of paths relative to the GP5")
     parser.add_argument("--keep-sce-sys", action="append", default=[], metavar="PATH",
@@ -849,6 +1174,7 @@ def main() -> None:
     root, output = args.source.resolve(), args.output.resolve()
     if output == root:
         raise ValueError("output must be distinct from the source directory")
+    entitlement_key = normalize_entitlement_key(args.volume, args.entitlement_key)
     keep = {path.replace("\\", "/").lstrip("/").casefold() for path in args.keep_sce_sys}
     # --build uses a custom-keystone-only SDK profile, so preserving the source
     # keystone is mandatory. GP5-only generation remains opt-in.
@@ -863,10 +1189,13 @@ def main() -> None:
     if args.build:
         if args.absolute_paths:
             raise ValueError("--absolute-paths is not used in --build mode")
+        if args.auto_size_profile is not None:
+            raise ValueError("--build detects its SDK profile automatically")
         package, count, skipped = build_bundle(
             root, output, args.volume, args.passcode, keep,
             args.publishing_tools.resolve(),
-            args.dds_converter.resolve() if args.dds_converter else None)
+            args.dds_converter.resolve() if args.dds_converter else None,
+            args.chunk_count)
         print(f"Created build bundle {output} with {count} explicit file mapping(s).")
         print(f"Final LibProsperoPkg-compatible package: {package}")
     else:
@@ -874,7 +1203,8 @@ def main() -> None:
             raise ValueError("output must be a .gp5 file unless --build is specified")
         count, skipped = build_gp5(
             root, output, args.volume, args.passcode, args.absolute_paths, keep,
-            args.dds_converter.resolve() if args.dds_converter else None)
+            args.dds_converter.resolve() if args.dds_converter else None,
+            entitlement_key, args.auto_size_profile, args.chunk_count)
         print(f"Created {output} with {count} explicit file mapping(s).")
     if skipped:
         print("Excluded " + str(len(skipped)) + " service/project artifact(s):")

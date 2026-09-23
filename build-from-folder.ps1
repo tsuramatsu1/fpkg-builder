@@ -6,12 +6,14 @@
     [string]$Python = "python",
     [string]$TemporaryDirectory = $env:LIBPROSPERO_TEMP_DIR,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
+    [ValidateRange(1, 255)][int]$ChunkCount = 100,
     [string]$ToolkitRoot,
     [switch]$KeepKeystone,
     [switch]$KeepIntermediate,
     [switch]$Force
 )
 $ErrorActionPreference = "Stop"
+$autoSizeProfile = "sdk279"
 # The scripts ship here; the SDK binaries they drive do not, and are found at run
 # time. Keeping the two apart is what lets this repo hold the scripts at all.
 $here = [IO.Path]::GetFullPath($PSScriptRoot)
@@ -128,7 +130,13 @@ if ($temporaryBuildDirectory) {
 Write-Host "[1/2] Creating GP5: $gp5"
 $gp5Args = @(
     (Join-Path $here "scripts/create-gp5-from-folder.py"),
-    $source, $gp5, "--passcode", $Passcode, "--absolute-paths", "--keep-keystone")
+    $source, $gp5, "--passcode", $Passcode, "--absolute-paths", "--keep-keystone",
+    "--chunk-count", $ChunkCount)
+if (-not $reference) {
+    $gp5Args += @("--auto-size-profile", $autoSizeProfile)
+} else {
+    Write-Host "Reference build: preserving source attributePub; unpacked patch size cannot determine remastered size."
+}
 # The generator looks for the DDS converter beside itself, which is no longer where
 # it lives, so the toolkit's copy is handed over explicitly.
 $ddsConverter = Find-DdsConverter $toolkit

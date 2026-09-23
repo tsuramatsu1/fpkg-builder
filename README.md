@@ -31,9 +31,9 @@ the package digest, quietly falling back to one would be worse than failing. To
 keep the binaries out of the checkout, point `-ToolkitRoot` or `PS5_FPKG_TOOLKIT`
 at a folder holding `toolchain/` instead.
 
-`toolchain/` is in `.gitignore`: the SDK binaries are not redistributable, so they
-stay in your working copy and are not committed. A fresh clone needs them copied
-in before it will build.
+`toolchain/` is committed, so a clone builds as-is. Updating the SDK means replacing
+those binaries — and because builds are not reproducible, a package built after an
+update has a different digest from one built before it. See **The one rule** below.
 
 ## Run it
 
