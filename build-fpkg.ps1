@@ -57,6 +57,7 @@ param(
     [string]$ContentVersion,
     [ValidateRange(-4, 9)][int]$CompressionLevel = 7,
     [string]$WorkFolder,
+    [string]$TemporaryDirectory = $env:LIBPROSPERO_TEMP_DIR,
     [string]$ToolkitRoot,
     [string]$Python = 'python',
     [switch]$KeepWork,
@@ -281,6 +282,19 @@ if (Test-Path -LiteralPath $work) {
 }
 New-Folder $work
 
+# The publisher writes its own scratch to TEMP, and a delta against a large base
+# needs roughly the uncompressed size of the title there - 162 GB for a big game.
+# The system temp drive is rarely the one with room, so it follows the work folder
+# unless it is pointed somewhere else.
+$publisherTemp = if ([string]::IsNullOrWhiteSpace($TemporaryDirectory)) {
+    Join-Path $work 'publisher-temp'
+} else {
+    Resolve-InputPath ([Environment]::ExpandEnvironmentVariables($TemporaryDirectory))
+}
+New-Folder $publisherTemp
+$env:TEMP = $publisherTemp
+$env:TMP = $publisherTemp
+
 $exitCode = 1
 try {
     # The dump is read where it lies. The GP5 names every file by its own absolute
@@ -401,11 +415,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "GP5 creation failed with exit code $LASTEXITCODE" }
 
     Write-Step "Building delta against reference (compression $CompressionLevel)"
+    $logDirectory = Join-Path $outDir ($stem + '-backport-logs')
+    New-Folder $logDirectory
     $partial = Join-Path $work 'update.partial.pkg'
+    Write-Note ("scratch : {0} ({1:N1} GB free)" -f
+                $publisherTemp, ((New-Object IO.DriveInfo(
+                    [IO.Path]::GetPathRoot($publisherTemp))).AvailableFreeSpace / 1GB))
+    # Keep the publisher's own words: the thrown exit code alone says nothing about
+    # what went wrong, and this step is where a build usually ends.
     & $publisher img_create --oformat nwonly --compression_level $CompressionLevel --no_progress_bar `
         --ref_pkg_path $reference $gp5 $partial 2>&1 |
+        Tee-Object -FilePath (Join-Path $logDirectory 'img-create.log') |
         ForEach-Object { Write-Note $_ }
-    if ($LASTEXITCODE -ne 0) { throw "img_create failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) {
+        throw ("img_create failed with exit code $LASTEXITCODE. " +
+               "Its output is in " + (Join-Path $logDirectory 'img-create.log'))
+    }
     if (-not (Test-Path -LiteralPath $partial -PathType Leaf)) {
         throw "Publisher did not produce $partial"
     }
