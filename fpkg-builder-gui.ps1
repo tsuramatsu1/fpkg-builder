@@ -45,11 +45,11 @@ public static long BytesRead(IntPtr handle) {
 }
 '@
 
-# Everything the GUI launches ships beside it; the publishing toolkit itself is
-# located by build-fpkg.ps1, which discovers it at run time.
+# Everything the GUI launches ships beside it.
 $repoRoot = [IO.Path]::GetFullPath($PSScriptRoot)
 $builderScript = Join-Path $repoRoot 'build-fpkg.ps1'
 $infoScript = Join-Path $repoRoot 'scripts\pkg-info.py'
+. (Join-Path $repoRoot 'scripts\find-toolkit.ps1')
 
 $script:process = $null
 $script:stdoutTask = $null
@@ -69,6 +69,8 @@ $script:baseStart = 0
 $script:baseSpan = 100
 $script:updateStart = 0
 $script:updateSpan = 100
+$script:activeLog = $null
+$script:destination = $null
 
 function Show-Error([string]$message) {
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -97,22 +99,60 @@ $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
 $root = New-Object System.Windows.Forms.TableLayoutPanel
 $root.Dock = 'Fill'
 $root.ColumnCount = 1
-$root.RowCount = 6
+$root.RowCount = 4
 $root.Padding = New-Object System.Windows.Forms.Padding(12)
-[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
-[void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Absolute, 26)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$root.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
 [void]$form.Controls.Add($root)
 
+# Each tab owns its inputs, its buttons and its log; the progress bar, Cancel and
+# the status line below them are shared, because only one job runs at a time.
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Dock = 'Fill'
+$tabs.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
+[void]$root.Controls.Add($tabs, 0, 0)
+
+function New-TabPage([string]$text, [int]$rowCount) {
+    $page = New-Object System.Windows.Forms.TabPage
+    $page.Text = $text
+    $page.UseVisualStyleBackColor = $true
+    $page.Padding = New-Object System.Windows.Forms.Padding(10)
+    $grid = New-Object System.Windows.Forms.TableLayoutPanel
+    $grid.Dock = 'Fill'
+    $grid.ColumnCount = 1
+    $grid.RowCount = $rowCount
+    for ($row = 0; $row -lt ($rowCount - 1); $row++) {
+        [void]$grid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::AutoSize)))
+    }
+    [void]$grid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+    [void]$page.Controls.Add($grid)
+    [void]$tabs.TabPages.Add($page)
+    return $grid
+}
+
+function New-LogBox {
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Multiline = $true
+    $box.ReadOnly = $true
+    $box.ScrollBars = 'Both'
+    $box.WordWrap = $false
+    $box.Dock = 'Fill'
+    $box.Font = New-Object System.Drawing.Font('Consolas', 9)
+    $box.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 0)
+    return $box
+}
+
+$buildGrid = New-TabPage 'Build' 4
+$extractGrid = New-TabPage 'Extract' 3
+
 $paths = New-Object System.Windows.Forms.GroupBox
 $paths.Text = 'Inputs'
 $paths.Dock = 'Fill'
 $paths.AutoSize = $true
 $paths.Padding = New-Object System.Windows.Forms.Padding(10, 6, 10, 10)
-[void]$root.Controls.Add($paths, 0, 0)
+[void]$buildGrid.Controls.Add($paths, 0, 0)
 
 $pathGrid = New-Object System.Windows.Forms.TableLayoutPanel
 $pathGrid.Dock = 'Fill'
@@ -125,7 +165,8 @@ $pathGrid.RowCount = 4
 [void]$paths.Controls.Add($pathGrid)
 
 function Add-PathRow {
-    param([int]$Row, [string]$LabelText)
+    param([int]$Row, [string]$LabelText, $Grid = $null)
+    if ($null -eq $Grid) { $Grid = $pathGrid }
     $label = New-Object System.Windows.Forms.Label
     $label.Text = $LabelText
     $label.AutoSize = $true
@@ -142,28 +183,30 @@ function Add-PathRow {
     $browse.MinimumSize = New-Object System.Drawing.Size(88, 27)
     $browse.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 2)
 
-    [void]$pathGrid.Controls.Add($label, 0, $Row)
-    [void]$pathGrid.Controls.Add($text, 1, $Row)
-    [void]$pathGrid.Controls.Add($browse, 2, $Row)
+    [void]$Grid.Controls.Add($label, 0, $Row)
+    [void]$Grid.Controls.Add($text, 1, $Row)
+    [void]$Grid.Controls.Add($browse, 2, $Row)
     return [PSCustomObject]@{ TextBox = $text; BrowseButton = $browse }
 }
 
 $gameRow = Add-PathRow -Row 0 -LabelText 'Game folder (dump):'
 $backportRow = Add-PathRow -Row 1 -LabelText 'Backport files (optional):'
 $referenceRow = Add-PathRow -Row 2 -LabelText 'Output folder:'
-$outputRow = Add-PathRow -Row 3 -LabelText 'Name (optional):'
+$workRow = Add-PathRow -Row 3 -LabelText 'Work folder (optional):'
+$outputRow = Add-PathRow -Row 4 -LabelText 'Name (optional):'
 
 $txtGame = $gameRow.TextBox
 $txtBackport = $backportRow.TextBox
 $txtOutDir = $referenceRow.TextBox
+$txtWork = $workRow.TextBox
 $txtName = $outputRow.TextBox
 
 $gameHint = New-Object System.Windows.Forms.Label
-$gameHint.Text = 'Both packages land in the output folder as <name>.pkg and <name>-backport.pkg. Name defaults to the title id. Leave the backport blank to build only the base.'
+$gameHint.Text = 'Both packages land in the output folder as <name>.pkg and <name>-backport.pkg. Name defaults to the title id. Leave the backport blank to build only the base.' + [Environment]::NewLine + 'The work folder holds a copy of the game unless it is on the same drive as the dump, in which case it is linked and costs nothing. Blank uses your temp folder.'
 $gameHint.AutoSize = $true
 $gameHint.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 6)
-$pathGrid.RowCount = 5
-[void]$pathGrid.Controls.Add($gameHint, 1, 4)
+$pathGrid.RowCount = 6
+[void]$pathGrid.Controls.Add($gameHint, 1, 5)
 $pathGrid.SetColumnSpan($gameHint, 2)
 
 # ------------------------------------------------------------------ options
@@ -172,7 +215,7 @@ $options.Text = 'Options'
 $options.Dock = 'Fill'
 $options.AutoSize = $true
 $options.Padding = New-Object System.Windows.Forms.Padding(10, 6, 10, 10)
-[void]$root.Controls.Add($options, 0, 1)
+[void]$buildGrid.Controls.Add($options, 0, 1)
 
 $optionFlow = New-Object System.Windows.Forms.FlowLayoutPanel
 $optionFlow.Dock = 'Fill'
@@ -211,17 +254,98 @@ $chkKeepWork.AutoSize = $true
 $chkKeepWork.Margin = New-Object System.Windows.Forms.Padding(24, 7, 0, 0)
 [void]$optionFlow.Controls.Add($chkKeepWork)
 
-# ------------------------------------------------------------------ log
-$log = New-Object System.Windows.Forms.TextBox
-$log.Multiline = $true
-$log.ReadOnly = $true
-$log.ScrollBars = 'Both'
-$log.WordWrap = $false
-$log.Dock = 'Fill'
-$log.Font = New-Object System.Drawing.Font('Consolas', 9)
-$log.Margin = New-Object System.Windows.Forms.Padding(0, 10, 0, 8)
-[void]$root.Controls.Add($log, 0, 2)
+# ------------------------------------------------------------- build actions
+$buildActions = New-Object System.Windows.Forms.FlowLayoutPanel
+$buildActions.Dock = 'Fill'
+$buildActions.AutoSize = $true
+$buildActions.FlowDirection = 'LeftToRight'
+$buildActions.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
+[void]$buildGrid.Controls.Add($buildActions, 0, 2)
 
+$btnBuild = New-Object System.Windows.Forms.Button
+$btnBuild.Text = 'Build'
+$btnBuild.AutoSize = $true
+$btnBuild.MinimumSize = New-Object System.Drawing.Size(150, 32)
+[void]$buildActions.Controls.Add($btnBuild)
+
+$btnInspect = New-Object System.Windows.Forms.Button
+$btnInspect.Text = 'Inspect base PKG'
+$btnInspect.AutoSize = $true
+$btnInspect.MinimumSize = New-Object System.Drawing.Size(150, 32)
+$btnInspect.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
+[void]$buildActions.Controls.Add($btnInspect)
+
+$btnOpenOutput = New-Object System.Windows.Forms.Button
+$btnOpenOutput.Text = 'Open output folder'
+$btnOpenOutput.AutoSize = $true
+$btnOpenOutput.MinimumSize = New-Object System.Drawing.Size(150, 32)
+$btnOpenOutput.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
+[void]$buildActions.Controls.Add($btnOpenOutput)
+
+$log = New-LogBox
+[void]$buildGrid.Controls.Add($log, 0, 3)
+
+# ------------------------------------------------------------------ extract
+$extractInputs = New-Object System.Windows.Forms.GroupBox
+$extractInputs.Text = 'Unpack a package'
+$extractInputs.Dock = 'Fill'
+$extractInputs.AutoSize = $true
+$extractInputs.Padding = New-Object System.Windows.Forms.Padding(10, 6, 10, 10)
+[void]$extractGrid.Controls.Add($extractInputs, 0, 0)
+
+$extractPathGrid = New-Object System.Windows.Forms.TableLayoutPanel
+$extractPathGrid.Dock = 'Fill'
+$extractPathGrid.AutoSize = $true
+$extractPathGrid.ColumnCount = 3
+$extractPathGrid.RowCount = 3
+[void]$extractPathGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 215)))
+[void]$extractPathGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+[void]$extractPathGrid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::AutoSize)))
+[void]$extractInputs.Controls.Add($extractPathGrid)
+
+$packageRow = Add-PathRow -Row 0 -LabelText 'Package (.pkg):' -Grid $extractPathGrid
+$destinationRow = Add-PathRow -Row 1 -LabelText 'Unpack into:' -Grid $extractPathGrid
+$txtPackage = $packageRow.TextBox
+$txtDestination = $destinationRow.TextBox
+
+$extractHint = New-Object System.Windows.Forms.Label
+$extractHint.Text = 'Unpacks the package into the destination folder. Packages this tool builds open here, base and patch alike; a retail package needs a passcode this tool does not have.'
+$extractHint.AutoSize = $true
+$extractHint.Margin = New-Object System.Windows.Forms.Padding(0, 2, 0, 6)
+[void]$extractPathGrid.Controls.Add($extractHint, 1, 2)
+$extractPathGrid.SetColumnSpan($extractHint, 2)
+
+$extractActions = New-Object System.Windows.Forms.FlowLayoutPanel
+$extractActions.Dock = 'Fill'
+$extractActions.AutoSize = $true
+$extractActions.FlowDirection = 'LeftToRight'
+$extractActions.Margin = New-Object System.Windows.Forms.Padding(0, 8, 0, 0)
+[void]$extractGrid.Controls.Add($extractActions, 0, 1)
+
+$btnExtract = New-Object System.Windows.Forms.Button
+$btnExtract.Text = 'Extract'
+$btnExtract.AutoSize = $true
+$btnExtract.MinimumSize = New-Object System.Drawing.Size(150, 32)
+[void]$extractActions.Controls.Add($btnExtract)
+
+$btnInspectPackage = New-Object System.Windows.Forms.Button
+$btnInspectPackage.Text = 'Inspect package'
+$btnInspectPackage.AutoSize = $true
+$btnInspectPackage.MinimumSize = New-Object System.Drawing.Size(150, 32)
+$btnInspectPackage.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
+[void]$extractActions.Controls.Add($btnInspectPackage)
+
+$btnOpenDestination = New-Object System.Windows.Forms.Button
+$btnOpenDestination.Text = 'Open destination'
+$btnOpenDestination.AutoSize = $true
+$btnOpenDestination.MinimumSize = New-Object System.Drawing.Size(150, 32)
+$btnOpenDestination.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
+[void]$extractActions.Controls.Add($btnOpenDestination)
+
+$extractLog = New-LogBox
+[void]$extractGrid.Controls.Add($extractLog, 0, 2)
+
+# ------------------------------------------------------------------ shared
 $progressBar = New-Object System.Windows.Forms.ProgressBar
 $progressBar.Dock = 'Fill'
 $progressBar.Style = 'Continuous'
@@ -230,41 +354,20 @@ $progressBar.Minimum = 0
 $progressBar.Maximum = 1000
 $progressBar.MarqueeAnimationSpeed = 30
 $progressBar.Margin = New-Object System.Windows.Forms.Padding(0, 0, 0, 8)
-[void]$root.Controls.Add($progressBar, 0, 3)
+[void]$root.Controls.Add($progressBar, 0, 1)
 
 $actions = New-Object System.Windows.Forms.FlowLayoutPanel
 $actions.Dock = 'Fill'
 $actions.AutoSize = $true
 $actions.FlowDirection = 'LeftToRight'
-[void]$root.Controls.Add($actions, 0, 4)
-
-$btnBuild = New-Object System.Windows.Forms.Button
-$btnBuild.Text = 'Build'
-$btnBuild.AutoSize = $true
-$btnBuild.MinimumSize = New-Object System.Drawing.Size(150, 32)
-[void]$actions.Controls.Add($btnBuild)
-
-$btnInspect = New-Object System.Windows.Forms.Button
-$btnInspect.Text = 'Inspect base PKG'
-$btnInspect.AutoSize = $true
-$btnInspect.MinimumSize = New-Object System.Drawing.Size(150, 32)
-$btnInspect.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
-[void]$actions.Controls.Add($btnInspect)
+[void]$root.Controls.Add($actions, 0, 2)
 
 $btnCancel = New-Object System.Windows.Forms.Button
 $btnCancel.Text = 'Cancel'
 $btnCancel.AutoSize = $true
 $btnCancel.Enabled = $false
 $btnCancel.MinimumSize = New-Object System.Drawing.Size(110, 32)
-$btnCancel.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
 [void]$actions.Controls.Add($btnCancel)
-
-$btnOpenOutput = New-Object System.Windows.Forms.Button
-$btnOpenOutput.Text = 'Open output folder'
-$btnOpenOutput.AutoSize = $true
-$btnOpenOutput.MinimumSize = New-Object System.Drawing.Size(150, 32)
-$btnOpenOutput.Margin = New-Object System.Windows.Forms.Padding(8, 3, 3, 3)
-[void]$actions.Controls.Add($btnOpenOutput)
 
 $status = New-Object System.Windows.Forms.Label
 $status.Text = 'Ready'
@@ -279,13 +382,16 @@ $footer.AutoSize = $true
 $footer.Anchor = 'Right'
 $footer.ForeColor = [System.Drawing.SystemColors]::GrayText
 $footer.Margin = New-Object System.Windows.Forms.Padding(0, 8, 2, 0)
-[void]$root.Controls.Add($footer, 0, 5)
+[void]$root.Controls.Add($footer, 0, 3)
 
 # ------------------------------------------------------------------ helpers
 function Append-Log([string]$line) {
     if ($null -eq $line) { return }
-    $log.AppendText(($line -replace "`r`n", "`n" -replace "`n", [Environment]::NewLine))
-    $log.AppendText([Environment]::NewLine)
+    # Each tab keeps its own transcript, so output follows the job that produced it
+    # rather than whichever tab happens to be in front.
+    $target = if ($null -eq $script:activeLog) { $log } else { $script:activeLog }
+    $target.AppendText(($line -replace "`r`n", "`n" -replace "`n", [Environment]::NewLine))
+    $target.AppendText([Environment]::NewLine)
 }
 
 function Format-Bytes([double]$bytes) {
@@ -407,17 +513,19 @@ function Remove-WorkFolder {
 function Set-Busy([bool]$busy) {
     $btnBuild.Enabled = -not $busy
     $btnInspect.Enabled = -not $busy
+    $btnExtract.Enabled = -not $busy
+    $btnInspectPackage.Enabled = -not $busy
     $btnCancel.Enabled = $busy
 }
 
-function Open-OutputFolder {
-    $dir = $txtOutDir.Text.Trim()
+function Open-Folder([string]$dir) {
+    $dir = $dir.Trim()
     if ([string]::IsNullOrWhiteSpace($dir)) {
-        Show-Error 'Set the output folder first.'
+        Show-Error 'Set the folder first.'
         return
     }
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-        Show-Error "There is no folder at $dir yet. It is created when a build starts."
+        Show-Error "There is no folder at $dir yet."
         return
     }
     try {
@@ -468,6 +576,27 @@ function Read-Json([string]$text) {
     try { return $text.Substring($start) | ConvertFrom-Json } catch { return $null }
 }
 
+function Read-PackageInfo([string]$package) {
+    <# pkg-info without the log noise, for decisions rather than for reading. #>
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = (Get-PythonPath)
+        $psi.Arguments = ((@($infoScript, $package) | ForEach-Object { Quote-Argument $_ }) -join ' ')
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $text = $proc.StandardOutput.ReadToEnd()
+        [void]$proc.StandardError.ReadToEnd()
+        $proc.WaitForExit()
+        if ($proc.ExitCode -ne 0) { return $null }
+        return Read-Json $text
+    } catch {
+        return $null
+    }
+}
+
 function Get-BasePath {
     $dir = $txtOutDir.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
@@ -485,6 +614,7 @@ function Get-BasePath {
 }
 
 function Inspect-Reference {
+    $script:activeLog = $log
     $base = Get-BasePath
     if ([string]::IsNullOrWhiteSpace($base)) {
         Show-Error 'Set the output folder, and either a name or a game folder to take it from.'
@@ -524,10 +654,21 @@ $backportRow.BrowseButton.Add_Click({
 $referenceRow.BrowseButton.Add_Click({
     if ($folderDialog.ShowDialog($form) -eq 'OK') { $txtOutDir.Text = $folderDialog.SelectedPath }
 })
+$workRow.BrowseButton.Add_Click({
+    if ($folderDialog.ShowDialog($form) -eq 'OK') { $txtWork.Text = $folderDialog.SelectedPath }
+})
 $outputRow.BrowseButton.Visible = $false
 
+$packageRow.BrowseButton.Add_Click({
+    if ($openPkg.ShowDialog($form) -eq 'OK') { $txtPackage.Text = $openPkg.FileName }
+})
+$destinationRow.BrowseButton.Add_Click({
+    if ($folderDialog.ShowDialog($form) -eq 'OK') { $txtDestination.Text = $folderDialog.SelectedPath }
+})
+
 $btnInspect.Add_Click({ [void](Inspect-Reference) })
-$btnOpenOutput.Add_Click({ Open-OutputFolder })
+$btnOpenOutput.Add_Click({ Open-Folder $txtOutDir.Text })
+$btnOpenDestination.Add_Click({ Open-Folder $txtDestination.Text })
 
 # ------------------------------------------------------------------ build
 function Pump-Output {
@@ -577,19 +718,137 @@ $timer.Add_Tick({
         } elseif ($code -eq 0) {
             $progressBar.Value = $progressBar.Maximum
         }
-        if ($script:cancelled -or $code -ne 0) { Remove-WorkFolder }
+        $extracting = $script:operation -eq 'Extract'
+        if (-not $extracting -and ($script:cancelled -or $code -ne 0)) { Remove-WorkFolder }
         if ($script:cancelled) {
             $status.Text = 'Cancelled'
             Append-Log 'Cancelled.'
+            # A half-written tree is not a package that was unpacked; say so rather
+            # than leave it looking finished.
+            if ($extracting -and $script:destination) {
+                Append-Log "Part of the package was already written to $script:destination."
+            }
         } elseif ($code -eq 0) {
-            $status.Text = 'Update built successfully'
-            Append-Log ''
-            Append-Log 'Done. Copy the update to the console and install it over the base game.'
+            if ($extracting) {
+                $status.Text = 'Package extracted'
+                Append-Log ''
+                Append-Log "Done. The package contents are in $script:destination."
+            } else {
+                $status.Text = 'Update built successfully'
+                Append-Log ''
+                Append-Log 'Done. Copy the update to the console and install it over the base game.'
+            }
         } else {
-            $status.Text = "Build failed (exit $code)"
+            $status.Text = if ($extracting) { "Extract failed (exit $code)" } else { "Build failed (exit $code)" }
         }
     }
 })
+
+function Start-Job-Process {
+    <# Launch a console job and hand it to the timer that drains its output. #>
+    param([string]$FilePath, [string[]]$Arguments, [string]$Operation, [string]$Label,
+          [long]$Total = 0)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = (($Arguments | ForEach-Object { Quote-Argument $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $script:operation = $Operation
+    $script:cancelled = $false
+    $script:buildStarted = Get-Date
+    $script:sampledAt = [DateTime]::MinValue
+    $script:phase = $null
+    $progressBar.Style = 'Continuous'
+    $progressBar.Value = $progressBar.Minimum
+    $script:process = [System.Diagnostics.Process]::Start($psi)
+    $script:stdoutEnded = $false
+    $script:stderrEnded = $false
+    $script:stdoutTask = $script:process.StandardOutput.ReadLineAsync()
+    $script:stderrTask = $script:process.StandardError.ReadLineAsync()
+    Set-Busy $true
+    if ($Total -gt 0) {
+        Set-Step -Label $Label -Total $Total -Start 0 -Span 100
+    } else {
+        Set-Step -Label $Label
+    }
+    $timer.Start()
+}
+
+function Start-Extract {
+    $package = $txtPackage.Text.Trim()
+    $destination = $txtDestination.Text.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($package)) {
+        Show-Error 'Choose the package to unpack.'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $package -PathType Leaf)) {
+        Show-Error "There is no package at $package"
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($destination)) {
+        Show-Error 'Choose the folder to unpack into.'
+        return
+    }
+    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+        Show-Error "The destination is a file, not a folder: $destination"
+        return
+    }
+    if ((Test-Path -LiteralPath $destination -PathType Container) -and
+        (Get-ChildItem -LiteralPath $destination -Force | Select-Object -First 1)) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            $form,
+            "$destination is not empty. Unpacking mixes the package contents in with what is already there." +
+            [Environment]::NewLine + [Environment]::NewLine + 'Carry on?',
+            'fPKG Builder',
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    }
+
+    try {
+        $toolkit = Find-ToolkitRoot '' $repoRoot
+    } catch {
+        Show-Error $_.Exception.Message
+        return
+    }
+    $publisher = Join-Path $toolkit 'toolchain\prospero-pub-cmd.exe'
+    try {
+        [void][IO.Directory]::CreateDirectory($destination)
+    } catch {
+        Show-Error "Could not create $destination - $($_.Exception.Message)"
+        return
+    }
+
+    $script:activeLog = $extractLog
+    $script:destination = $destination
+    $extractLog.Clear()
+    Append-Log "Unpacking $package"
+
+    # A patch package is refused outright when a passcode is supplied ("Parsing patch
+    # package with passcode is not supported"), and a base package opened without one
+    # yields only its outer entries. The container kind decides which to use.
+    $info = Read-PackageInfo $package
+    if ($null -ne $info) {
+        $title = if ($info.param -and $info.param.titleName) { $info.param.titleName } else { 'unknown title' }
+        $titleId = if ($info.param -and $info.param.titleId) { $info.param.titleId } else { '?' }
+        Append-Log ("{0} [{1}] - {2}" -f $title, $titleId, $info.kind)
+    }
+    $isPatch = ($null -ne $info) -and ($info.kind -eq 'ps5-delta')
+    $passcodeArgs = if ($isPatch) { @('--no_passcode') } else { @('--passcode', ('0' * 32)) }
+    if ($isPatch) {
+        Append-Log 'A patch package holds only what it changes, so expect a handful of files rather than a game.'
+    }
+    Append-Log "into $destination"
+    Append-Log ''
+
+    # The publisher reads the package once, so its own read count measures the job.
+    Start-Job-Process -FilePath $publisher -Operation 'Extract' -Label 'Extracting package' `
+        -Total (Get-FileBytes $package) `
+        -Arguments (@('img_extract') + $passcodeArgs + @('--no_progress_bar', $package, $destination))
+}
 
 function Start-Build {
     $game = $txtGame.Text.Trim()
@@ -620,20 +879,18 @@ function Start-Build {
     $status.Text = 'Measuring the input folders...'
     $form.Refresh()
     $script:gameBytes = Measure-FolderBytes $game
-    $script:buildStarted = Get-Date
-    $script:sampledAt = [DateTime]::MinValue
-    $script:phase = $null
     # The two publisher runs are what the build spends its time on, so they get the
     # bar between them; a run that does only one of the two gets the whole of it.
     $script:baseStart = 0
     $script:baseSpan = if ($wantUpdate) { 70 } else { 100 }
     $script:updateStart = if ($baseExists) { 0 } else { 70 }
     $script:updateSpan = 100 - $script:updateStart
-    $progressBar.Style = 'Continuous'
-    $progressBar.Value = $progressBar.Minimum
 
-    $script:workFolder = Join-Path ([IO.Path]::GetTempPath()) ("fpkg-builder-" + [Guid]::NewGuid().ToString('N'))
-    $script:cancelled = $false
+    # A named work folder is a place the user picked for having room; the build gets
+    # its own subfolder there so cleaning up never touches anything else.
+    $workRoot = $txtWork.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($workRoot)) { $workRoot = [IO.Path]::GetTempPath() }
+    $script:workFolder = Join-Path $workRoot ("fpkg-builder-" + [Guid]::NewGuid().ToString('N'))
     $arguments = @(
         '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $builderScript,
         '-OutputFolder', $dir,
@@ -647,30 +904,29 @@ function Start-Build {
     }
     if ($chkKeepWork.Checked) { $arguments += '-KeepWork' }
 
+    $script:activeLog = $log
     $log.Clear()
     Append-Log $(if ($baseExists) { "Using the existing base package: $base" } else { "Building the base package from $game" })
     Append-Log $(if ($wantUpdate) { "Then the backport update from $backport" } else { 'No backport folder set - base package only.' })
     Append-Log ''
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = (Get-Command powershell.exe).Source
-    $psi.Arguments = (($arguments | ForEach-Object { Quote-Argument $_ }) -join ' ')
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $script:process = [System.Diagnostics.Process]::Start($psi)
     $script:lastOutput = $dir
-    $script:stdoutEnded = $false
-    $script:stderrEnded = $false
-    $script:stdoutTask = $script:process.StandardOutput.ReadLineAsync()
-    $script:stderrTask = $script:process.StandardError.ReadLineAsync()
-    Set-Busy $true
-    Set-Step -Label 'Starting the build'
-    $timer.Start()
+    Start-Job-Process -FilePath (Get-Command powershell.exe).Source -Arguments $arguments `
+        -Operation 'Build' -Label 'Starting the build'
 }
 
 $btnBuild.Add_Click({ Start-Build })
+$btnExtract.Add_Click({ Start-Extract })
+$btnInspectPackage.Add_Click({
+    $package = $txtPackage.Text.Trim()
+    if (-not (Test-Path -LiteralPath $package -PathType Leaf)) {
+        Show-Error 'Choose the package to inspect.'
+        return
+    }
+    $script:activeLog = $extractLog
+    [void](Invoke-Tool -FilePath (Get-PythonPath) -Arguments @($infoScript, $package) `
+        -Activity 'Reading package...')
+})
 
 $btnCancel.Add_Click({
     if ($null -eq $script:process -or $script:process.HasExited) { return }

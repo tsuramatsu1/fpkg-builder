@@ -73,7 +73,9 @@ GENERATED_SCE_SYS_FILES = frozenset({
     "target-relocinfo.dat",
 })
 GENERATED_SCE_SYS_DIRECTORIES = frozenset({"about"})
-GENERATED_ROOT_DIRECTORIES = frozenset({"sce_suppl", "sce_sc"})
+# playgo-languages is regenerated below, so a copy carried in from an extracted
+# package collides with the generated one and the publisher rejects the GP5.
+GENERATED_ROOT_DIRECTORIES = frozenset({"sce_suppl", "sce_sc", "playgo-languages"})
 RESERVED_SCE_SYS_SUFFIXES = frozenset({".dds", ".auth_info"})
 PROJECT_SUFFIXES = frozenset({".gp4", ".gp5", ".esbak"})
 EXCLUDED_ROOT_FILES = frozenset({"ampr_emu.index"})
@@ -272,14 +274,14 @@ def write_repaired_self(
 
 
 def prepare_executable_inputs(
-    root: Path, files: list[Path], generated_root: Path,
+    destinations: dict[Path, str], files: list[Path], generated_root: Path,
 ) -> dict[Path, Path]:
     replacements: dict[Path, Path] = {}
     for source in files:
         plan = self_repair_plan(source)
         if plan is None:
             continue
-        relative = relative_posix(root, source)
+        relative = destinations[source]
         destination = generated_root / NORMALIZED_SELF_DIRECTORY / Path(relative)
         rewrite_magic, _, padding = plan
         repairs = []
@@ -327,57 +329,99 @@ def is_unusable_ucp(path: Path) -> bool:
     return not any(header.startswith(magic) for magic in UCP_MAGICS)
 
 
-def collect_files(root: Path, output: Path, keep_service_paths: set[str]) -> tuple[list[Path], list[str]]:
-    included: list[Path] = []
+def collect_files(root: Path, output: Path, keep_service_paths: set[str],
+                  overlay: Path | None = None,
+                  ) -> tuple[list[Path], dict[Path, str], list[str]]:
+    """
+    Gather the package inputs.
+
+    Returns the source files, the in-package path each one occupies, and what was
+    left out. Keeping those two apart is what lets a file's bytes come from
+    somewhere other than the tree being described: an overlay replaces a file
+    without the dump being touched, so a dump can be read where it lies instead
+    of being copied somewhere writable first.
+
+    Overlay entries are merged before anything downstream runs, so a replaced
+    executable still goes through SELF repair and a replaced param.json is still
+    normalized - which a substitution made later in the GP5 would have skipped.
+    """
     skipped: list[str] = []
 
-    def walk(directory: Path) -> None:
-        for item in sorted(directory.iterdir(), key=lambda entry: entry.name.casefold()):
-            if item.is_symlink():
-                raise ValueError(f"symbolic link/junction is not a GP5 input: {item}")
-            relative = relative_posix(root, item)
-            if item == output:
-                skipped.append(relative + " (output GP5)")
-                continue
-            if item.is_dir():
-                if (item.parent == root and
-                        item.name.casefold() == GENERATED_ASSET_DIRECTORY.casefold()):
-                    skipped.append(relative + "/ (generated GP5 assets)")
-                    continue
-                if (item.parent == root and
-                        item.name.casefold() in GENERATED_ROOT_DIRECTORIES):
-                    skipped.append(relative + "/ (reserved/SDK-generated directory)")
-                    continue
-                walk(item)
-                continue
-            if not item.is_file():
-                skipped.append(relative + " (not a regular file)")
-                continue
-            if item.suffix.casefold() in PROJECT_SUFFIXES:
-                skipped.append(relative + " (project artifact)")
-                continue
-            if item.name.casefold().endswith(".playgo-scenario.json"):
-                skipped.append(relative + " (generated GP5 scenario sidecar)")
-                continue
-            normalized = relative.casefold()
-            if normalized in EXCLUDED_ROOT_FILES:
-                skipped.append(relative + " (host emulator index)")
-                continue
-            if (normalized.startswith("fakelib/") and
-                    normalized.removeprefix("fakelib/") in EXCLUDED_FAKE_LIBRARIES):
-                skipped.append(relative + " (SDK/runtime fakelib module)")
-                continue
-            if is_unusable_ucp(item) and normalized not in keep_service_paths:
-                skipped.append(
-                    relative + " (encrypted UCP container; no trophy set in this build)")
-                continue
-            if is_service_artifact(relative) and normalized not in keep_service_paths:
-                skipped.append(relative + " (reserved/SDK-generated sce_sys artifact)")
-                continue
-            included.append(item)
+    def gather(base: Path) -> list[tuple[str, Path]]:
+        found: list[tuple[str, Path]] = []
 
-    walk(root)
-    return included, skipped
+        def walk(directory: Path) -> None:
+            for item in sorted(directory.iterdir(), key=lambda entry: entry.name.casefold()):
+                if item.is_symlink():
+                    raise ValueError(f"symbolic link/junction is not a GP5 input: {item}")
+                relative = relative_posix(base, item)
+                if item == output:
+                    skipped.append(relative + " (output GP5)")
+                    continue
+                if item.is_dir():
+                    if (item.parent == base and
+                            item.name.casefold() == GENERATED_ASSET_DIRECTORY.casefold()):
+                        skipped.append(relative + "/ (generated GP5 assets)")
+                        continue
+                    if (item.parent == base and
+                            item.name.casefold() in GENERATED_ROOT_DIRECTORIES):
+                        skipped.append(relative + "/ (reserved/SDK-generated directory)")
+                        continue
+                    walk(item)
+                    continue
+                if not item.is_file():
+                    skipped.append(relative + " (not a regular file)")
+                    continue
+                if item.suffix.casefold() in PROJECT_SUFFIXES:
+                    skipped.append(relative + " (project artifact)")
+                    continue
+                if item.name.casefold().endswith(".playgo-scenario.json"):
+                    skipped.append(relative + " (generated GP5 scenario sidecar)")
+                    continue
+                normalized = relative.casefold()
+                if normalized in EXCLUDED_ROOT_FILES:
+                    skipped.append(relative + " (host emulator index)")
+                    continue
+                if (normalized.startswith("fakelib/") and
+                        normalized.removeprefix("fakelib/") in EXCLUDED_FAKE_LIBRARIES):
+                    skipped.append(relative + " (SDK/runtime fakelib module)")
+                    continue
+                if is_unusable_ucp(item) and normalized not in keep_service_paths:
+                    skipped.append(
+                        relative + " (encrypted UCP container; no trophy set in this build)")
+                    continue
+                if is_service_artifact(relative) and normalized not in keep_service_paths:
+                    skipped.append(relative + " (reserved/SDK-generated sce_sys artifact)")
+                    continue
+                found.append((relative, item))
+
+        walk(base)
+        return found
+
+    entries: dict[str, tuple[str, Path]] = {}
+    order: list[str] = []
+
+    def record(relative: str, item: Path) -> None:
+        key = relative.casefold()
+        if key not in entries:
+            order.append(key)
+        entries[key] = (relative, item)
+
+    for relative, item in gather(root):
+        record(relative, item)
+    if overlay is not None:
+        for relative, item in gather(overlay):
+            replaced = relative.casefold() in entries
+            record(relative, item)
+            print(f"Overlay {'replaces' if replaced else 'adds'} {relative}")
+
+    files: list[Path] = []
+    destinations: dict[Path, str] = {}
+    for key in order:
+        relative, item = entries[key]
+        files.append(item)
+        destinations[item] = relative
+    return files, destinations, skipped
 
 
 def content_id(param_path: Path) -> str | None:
@@ -752,6 +796,7 @@ def build_gp5(
     entitlement_key: str | None = None,
     auto_size_profile: str | None = None,
     chunk_count: int = DEFAULT_PLAYGO_CHUNK_COUNT,
+    overlay: Path | None = None,
 ) -> tuple[int, list[str]]:
     if len(passcode) != 32:
         raise ValueError("passcode must contain exactly 32 characters")
@@ -772,16 +817,18 @@ def build_gp5(
         raise FileExistsError(f"generated PlayGo scenario already exists: {scenario_input}")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    files, skipped = collect_files(root, output, keep_service_paths)
-    param = root / "sce_sys" / "param.json"
-    if param not in files:
-        reason = "excluded as a service artifact" if param.exists() else "missing"
+    files, destinations, skipped = collect_files(root, output, keep_service_paths, overlay)
+    param = next((file for file in files
+                  if destinations[file].casefold() == "sce_sys/param.json"), None)
+    if param is None:
+        on_disk = root / "sce_sys" / "param.json"
+        reason = "excluded as a service artifact" if on_disk.exists() else "missing"
         raise ValueError(f"required sce_sys/param.json is {reason}")
     package_content_id = content_id(param)
     # PSAL permits only its original RGB icon0.png. Other volume types use a
     # DDS only when its PNG counterpart is absent or has the wrong color mode.
     dds_images = [] if is_psal else sce_sys_dds_images(root)
-    source_pngs = {relative_posix(root, file).casefold(): file for file in files}
+    source_pngs = {destinations[file].casefold(): file for file in files}
     needed_conversions: list[tuple[Path, str]] = []
     replaced_pngs: set[Path] = set()
     for dds, png_name in dds_images:
@@ -792,13 +839,13 @@ def build_gp5(
             continue
         if original is not None:
             replaced_pngs.add(original)
-            skipped.append(relative_posix(root, original) +
+            skipped.append(destinations[original] +
                            " (invalid PNG color mode; replaced from DDS)")
         needed_conversions.append((dds, png_name))
     if replaced_pngs:
         files = [file for file in files if file not in replaced_pngs]
     for file in files:
-        relative = relative_posix(root, file)
+        relative = destinations[file]
         if (relative.casefold().startswith("sce_sys/") and
                 relative.count("/") == 1 and file.suffix.casefold() == ".png"):
             required_color = required_png_color_type(file.name)
@@ -810,7 +857,7 @@ def build_gp5(
         allowed = {"sce_sys/param.json", "sce_sys/icon0.png"}
         selected: list[Path] = []
         for file in files:
-            relative = relative_posix(root, file)
+            relative = destinations[file]
             if relative.casefold() in allowed:
                 selected.append(file)
             else:
@@ -818,7 +865,7 @@ def build_gp5(
         files = selected
         icon = next(
             (file for file in files
-             if relative_posix(root, file).casefold() == "sce_sys/icon0.png"), None)
+             if destinations[file].casefold() == "sce_sys/icon0.png"), None)
         if icon is None:
             raise ValueError("--volume al requires sce_sys/icon0.png")
         validate_psal_icon(icon)
@@ -839,7 +886,7 @@ def build_gp5(
     converted_pngs = convert_dds_images(
         needed_conversions, generated_system, converter_path)
     executable_replacements = ({} if is_psal else
-                               prepare_executable_inputs(root, files, generated_root))
+                               prepare_executable_inputs(destinations, files, generated_root))
     language_payloads = (write_language_payloads(generated_root, chunk_languages, chunk_count)
                          if volume == "app" else [])
     size_selection = None
@@ -942,7 +989,7 @@ def build_gp5(
         actual_source = (generated_param if file == param else
                          executable_replacements.get(file, file))
         attributes = {
-            "dst_path": relative_posix(root, file),
+            "dst_path": destinations[file],
             "src_path": source_path(output.parent, actual_source, absolute_paths),
         }
         if not is_psal:
@@ -1170,6 +1217,10 @@ def main() -> None:
     parser.add_argument(
         "--dds-converter", type=Path,
         help="path to the standalone prospero-dds2png executable")
+    parser.add_argument(
+        "--overlay", type=Path,
+        help="folder whose files replace or add to the source tree; the source is "
+             "read where it lies and is never modified or copied")
     args = parser.parse_args()
     root, output = args.source.resolve(), args.output.resolve()
     if output == root:
@@ -1204,7 +1255,8 @@ def main() -> None:
         count, skipped = build_gp5(
             root, output, args.volume, args.passcode, args.absolute_paths, keep,
             args.dds_converter.resolve() if args.dds_converter else None,
-            entitlement_key, args.auto_size_profile, args.chunk_count)
+            entitlement_key, args.auto_size_profile, args.chunk_count,
+            args.overlay.resolve() if args.overlay else None)
         print(f"Created {output} with {count} explicit file mapping(s).")
     if skipped:
         print("Excluded " + str(len(skipped)) + " service/project artifact(s):")

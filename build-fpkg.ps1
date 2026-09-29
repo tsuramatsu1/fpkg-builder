@@ -96,38 +96,10 @@ function New-Folder([string]$path) {
     [void][IO.Directory]::CreateDirectory((Resolve-InputPath $path))
 }
 
-function New-LinkedTree([string]$source, [string]$destination) {
-    <#
-        Mirror a tree using hard links instead of copying the bytes. The build only
-        ever replaces whole files, so the links are read-only in practice - but every
-        writer in this script must delete a link before writing, or it would write
-        through the link into the caller's source tree.
-
-        Hard links cannot cross volumes; the caller checks that first.
-    #>
-    $sourceRoot = $source.TrimEnd('\', '/')
-    $linked = 0
-    New-Folder $destination
-    Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory | ForEach-Object {
-        $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
-        New-Folder (Join-Path $destination $relative)
-    }
-    Get-ChildItem -LiteralPath $sourceRoot -Recurse -File | ForEach-Object {
-        $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
-        $target = Join-Path $destination $relative
-        # Both sides are wildcard patterns to New-Item, and a dump folder named
-        # "[SITE] - Game" is a character class that matches nothing on disk.
-        New-Item -ItemType HardLink -Path ([WildcardPattern]::Escape($target)) `
-                 -Value ([WildcardPattern]::Escape($_.FullName)) -ErrorAction Stop | Out-Null
-        $linked++
-    }
-    return $linked
-}
-
 function Set-BuildTreeFile {
     <#
-        Replace a file in the build tree. Removes the existing entry first so a hard
-        link is broken rather than written through into the source tree.
+        Write a file into the staging folder. Only what the build changes is staged;
+        the game itself is read where it lies and never written to.
     #>
     param([string]$Path, [string]$FromFile, [string]$Content)
     $parent = Split-Path -Parent $Path
@@ -311,68 +283,36 @@ New-Folder $work
 
 $exitCode = 1
 try {
+    # The dump is read where it lies. The GP5 names every file by its own absolute
+    # path, so the only thing that has to be staged is what the build changes - the
+    # backport files and a param.json carrying the new contentVersion. A multi-GB
+    # game is never duplicated, and the source tree is never written to.
     if ($game) {
-        # Link rather than copy when possible: the build tree is only ever read from
-        # and whole-file replaced, so duplicating a multi-GB dump buys nothing.
-        $sameVolume = [IO.Path]::GetPathRoot($game) -ieq [IO.Path]::GetPathRoot($work)
-        $linked = $false
-        if ($sameVolume) {
-            Write-Step "Linking game folder into work tree"
-            Write-Note $overlay
-            try {
-                $count = New-LinkedTree $game $overlay
-                Write-Note "$count file(s) hard-linked; no data copied."
-                $linked = $true
-            } catch {
-                Write-Warn "Hard-linking failed ($($_.Exception.Message)); falling back to a copy."
-                Remove-Item -LiteralPath $overlay -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        } else {
-            Write-Note "Game folder and work folder are on different volumes; copying."
-            Write-Note "Use -WorkFolder on the same drive as the game to link instead."
-        }
-        if (-not $linked) {
-            Write-Step "Copying game folder to work tree"
-            Write-Note $overlay
-            # -ArgumentList joins the elements with spaces and quotes nothing, so a
-            # path with a space in it arrives as several arguments. The trailing
-            # separator has to go too: robocopy reads \" as an escaped quote.
-            $robo = Start-Process -FilePath 'robocopy.exe' `
-                -ArgumentList @(('"' + $game.TrimEnd('\', '/') + '"'),
-                                ('"' + $overlay.TrimEnd('\', '/') + '"'),
-                                '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/MT:16') `
-                -NoNewWindow -Wait -PassThru
-            # robocopy uses a bitmask: < 8 means success, >= 8 is a real failure.
-            if ($robo.ExitCode -ge 8) { throw "robocopy failed with exit code $($robo.ExitCode)" }
-        }
+        $sourceRoot = $game
+        Write-Step "Reading the game folder in place"
+        Write-Note $sourceRoot
     } else {
         # No game folder supplied: the reference package already contains every file
-        # the GP5 must describe, so unpack it and use that as the build tree.
+        # the GP5 must describe, so unpack it and read that instead.
+        $sourceRoot = Join-Path $work 'source'
         Write-Step "Extracting base package to work tree (no game folder supplied)"
-        Write-Note $overlay
-        New-Folder $overlay
-        & $publisher img_extract --passcode ('0' * 32) --no_progress_bar $reference $overlay 2>&1 |
+        Write-Note $sourceRoot
+        New-Folder $sourceRoot
+        & $publisher img_extract --passcode ('0' * 32) --no_progress_bar $reference $sourceRoot 2>&1 |
             ForEach-Object { Write-Note $_ }
         if ($LASTEXITCODE -ne 0) { throw "img_extract failed with exit code $LASTEXITCODE" }
     }
+    New-Folder $overlay
 
-    # The builder regenerates the PlayGo language payloads, so a copy carried in
-    # from an extracted package collides with the generated one and the publisher
-    # rejects the GP5 with: invalid attribute value dst_path="playgo-languages/...".
-    # Removing links only unlinks them; the source tree keeps its own entries.
-    $languages = Join-Path $overlay 'playgo-languages'
-    if (Test-Path -LiteralPath $languages) {
-        Remove-Item -LiteralPath $languages -Recurse -Force
-        Write-Note 'Removed playgo-languages/ (regenerated by the builder)'
-    }
-
-    $keystone = Join-Path $overlay 'sce_sys\keystone'
+    # playgo-languages is left alone: the source tree is read-only now, and the
+    # generator drops any copy it finds in favour of the payloads it regenerates.
+    $keystone = Join-Path $sourceRoot 'sce_sys\keystone'
     if (-not (Test-Path -LiteralPath $keystone -PathType Leaf) -or
         (Get-Item -LiteralPath $keystone).Length -ne 96) {
-        throw "This toolchain requires a 96-byte sce_sys\keystone in the build tree"
+        throw "This toolchain requires a 96-byte sce_sys\keystone in $sourceRoot"
     }
 
-    Write-Step "Overlaying backport files"
+    Write-Step "Staging backport files"
     # Backport files always sit at the game root, so the folder handed in must be the
     # one whose children are eboot.bin / sce_module / fakelib. Releases are often
     # wrapped in an outer folder; overlaying that would bury everything one level
@@ -403,7 +343,9 @@ try {
             return
         }
         $target = Join-Path $overlay $relative
-        $replaces = Test-Path -LiteralPath $target -PathType Leaf
+        # Whether this replaces something is a fact about the game, not about the
+        # staging folder, which starts empty.
+        $replaces = Test-Path -LiteralPath (Join-Path $sourceRoot $relative) -PathType Leaf
         Set-BuildTreeFile -Path $target -FromFile $_.FullName
         $applied += $relative
         if (-not $replaces) { $newPaths += $relative }
@@ -425,25 +367,33 @@ try {
     }
 
     Write-Step "Setting contentVersion to $ContentVersion"
-    $paramPath = Join-Path $overlay 'sce_sys\param.json'
-    if (-not (Test-Path -LiteralPath $paramPath -PathType Leaf)) {
-        throw "Missing $paramPath"
+    # Read from the game, write the patched copy into the staging folder: the
+    # backport may ship its own param.json, and that one has to win.
+    $stagedParam = Join-Path $overlay 'sce_sys\param.json'
+    $paramSource = if (Test-Path -LiteralPath $stagedParam -PathType Leaf) {
+        $stagedParam
+    } else {
+        Join-Path $sourceRoot 'sce_sys\param.json'
     }
-    $paramText = Get-Content -LiteralPath $paramPath -Raw -Encoding UTF8
+    if (-not (Test-Path -LiteralPath $paramSource -PathType Leaf)) {
+        throw "Missing $paramSource"
+    }
+    $paramText = Get-Content -LiteralPath $paramSource -Raw -Encoding UTF8
     $patched = [regex]::Replace(
         $paramText,
         '("contentVersion"\s*:\s*")[^"]*(")',
         { param($m) $m.Groups[1].Value + $ContentVersion + $m.Groups[2].Value },
         1)
     if ($patched -eq $paramText) {
-        throw "Could not set contentVersion in $paramPath"
+        throw "Could not set contentVersion in $paramSource"
     }
-    Set-BuildTreeFile -Path $paramPath -Content $patched
+    Set-BuildTreeFile -Path $stagedParam -Content $patched
 
     Write-Step "Generating GP5"
     $gp5 = Join-Path $work 'project.gp5'
-    $gp5Args = @($gp5Script, $overlay, $gp5,
-                 '--passcode', ('0' * 32), '--absolute-paths', '--keep-keystone')
+    $gp5Args = @($gp5Script, $sourceRoot, $gp5,
+                 '--passcode', ('0' * 32), '--absolute-paths', '--keep-keystone',
+                 '--overlay', $overlay)
     # The generator looks for the DDS converter beside itself, which is no longer
     # where it lives, so the toolkit's copy is handed over explicitly.
     if ($ddsConverter) { $gp5Args += @('--dds-converter', $ddsConverter) }
