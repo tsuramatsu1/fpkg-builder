@@ -417,10 +417,27 @@ try {
     Write-Step "Building delta against reference (compression $CompressionLevel)"
     $logDirectory = Join-Path $outDir ($stem + '-backport-logs')
     New-Folder $logDirectory
+    # The delta is small, but the publisher drops a full-size .remastered.pkg beside
+    # it on every reference build - roughly the size of the base package. Both land
+    # in the work folder, which is the one chosen for having room; only the finished
+    # delta is moved out to the output folder afterwards.
     $partial = Join-Path $work 'update.partial.pkg'
-    Write-Note ("scratch : {0} ({1:N1} GB free)" -f
-                $publisherTemp, ((New-Object IO.DriveInfo(
-                    [IO.Path]::GetPathRoot($publisherTemp))).AvailableFreeSpace / 1GB))
+    $remastered = $partial + '.remastered.pkg'
+    $referenceBytes = (Get-Item -LiteralPath $reference).Length
+    $workFree = (New-Object IO.DriveInfo([IO.Path]::GetPathRoot($work))).AvailableFreeSpace
+    if ($workFree -lt $referenceBytes) {
+        # An estimate, not a measurement: the remastered image is a full package of
+        # this title, so the base package is the closest thing to a figure we have.
+        # It warns rather than refuses, because guessing high would block a build
+        # that might well have fitted.
+        $message = "A delta build also writes a full remastered image next to the delta. " +
+                   "Judging by the base package that could be around {0:N1} GB, and the " +
+                   "drive holding {1} has {2:N1} GB free. If it runs out, the publisher " +
+                   "fails at the end with 'Could not open or write pkg file'."
+        Write-Warn ($message -f ($referenceBytes / 1GB), $work, ($workFree / 1GB))
+    }
+    Write-Note ("work    : {0} ({1:N1} GB free, needs about {2:N1} GB)" -f
+                $work, ($workFree / 1GB), ($referenceBytes / 1GB))
     # Keep the publisher's own words: the thrown exit code alone says nothing about
     # what went wrong, and this step is where a build usually ends.
     & $publisher img_create --oformat nwonly --compression_level $CompressionLevel --no_progress_bar `
@@ -435,11 +452,16 @@ try {
         throw "Publisher did not produce $partial"
     }
 
+    if (-not (Test-Path -LiteralPath $remastered -PathType Leaf)) {
+        Write-Warn "The publisher did not leave a remastered image beside the delta."
+    }
     $outputDirectory = Split-Path -Parent $output
     if ($outputDirectory -and -not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
         New-Folder $outputDirectory
     }
     if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Force }
+    # Only the delta leaves the work folder. The remastered image stays behind and
+    # goes when the work folder does.
     Move-Item -LiteralPath $partial -Destination $output
 
     $metric = "$partial.naps_metric.json"
